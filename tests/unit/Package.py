@@ -31,10 +31,12 @@
 """
 Unit tests for :mod:`pyTooling.GitLab`.
 """
+from pyTooling.CI         import CIError
 from pyTooling.Testing    import Testcase, testsuite, testcase
 from pyTooling.Versioning import SemanticVersion
 
 from pyTooling            import GitLab
+from pyTooling.GitLab     import GitLabError
 
 
 if __name__ == "__main__":  # pragma: no cover
@@ -68,3 +70,17 @@ class Metadata(Testcase):
 		self.assertTrue(GitLab.__project_url__.endswith("/pyTooling.GitLab"))
 		self.assertTrue(GitLab.__documentation_url__.endswith("/pyTooling.GitLab"))
 		self.assertTrue(GitLab.__issue_tracker_url__.endswith("/pyTooling.GitLab/issues"))
+
+
+@testsuite("Exceptions")
+class Exceptions(Testcase):
+	"""The base-exception of package :mod:`pyTooling.GitLab`."""
+
+	@testcase("Base-exception")
+	def Base(self) -> None:
+		"""
+		The package's base-exception is a CI error of pyTooling.
+
+		Checks the base-class of 'GitLabError'.
+		"""
+		self.assertTrue(issubclass(GitLabError, CIError))

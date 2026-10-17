@@ -29,10 +29,13 @@
 # ==================================================================================================================== #
 #
 """
-Working with GitLab CI/CD pipelines: pipeline configuration files, pipeline runs, and their conversion into traces.
+Working with GitLab CI/CD pipelines: pipeline files, pipeline runs, and their conversion into traces.
 
-A pipeline configuration file is a ``.gitlab-ci.yml`` file. Pipeline runs are read from GitLab's REST API. A trace is
-written e.g. as OpenTelemetry's OTLP/JSON.
+A pipeline file is a :file:`.gitlab-ci.yml` and the files it includes. A pipeline run is read from GitLab's REST API.
+A trace is written e.g. as OpenTelemetry's OTLP/JSON.
+
+The models derive from the service-independent model :mod:`pyTooling.CI`. Every exception raised by this package
+derives from :exc:`GitLabError`.
 """
 __author__ =            "Patrick Lehmann"
 __email__ =             "Paebbels@gmail.com"
@@ -43,3 +46,11 @@ __keywords__ =          ["GitLab", "GitLab CI/CD", "Pipeline", "CI", "Trace", "O
 __project_url__ =       "https://github.com/pyTooling/pyTooling.GitLab"
 __documentation_url__ = "https://pyTooling.github.io/pyTooling.GitLab"
 __issue_tracker_url__ = "https://GitHub.com/pyTooling/pyTooling.GitLab/issues"
+
+from pyTooling.CI         import CIError
+from pyTooling.Decorators import export
+
+
+@export
+class GitLabError(CIError):
+	"""Base-exception of all exceptions raised by :mod:`pyTooling.GitLab`."""
