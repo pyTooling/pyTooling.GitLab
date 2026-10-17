@@ -36,6 +36,7 @@ read once into objects:
 .. tree::
 
    - :class:`PipelineFile` | a configuration file, e.g. :file:`.gitlab-ci.yml`
+     - :class:`Input`      | an input of the header's ``spec:inputs``
      - :class:`Workflow`   | the ``workflow`` key
        - :class:`Rule`     | a rule deciding whether a pipeline is created
      - :class:`Include`    | an entry of ``include``
@@ -47,6 +48,7 @@ read once into objects:
          - :class:`Parallel` | the matrix instances needed
        - :class:`Rule`     | a rule deciding whether the job is added to a pipeline
        - :class:`Variable` | a variable of the job
+       - :class:`Input`    | an input of the job
        - :class:`Parallel` | the job's ``parallel``: how often it runs, or its matrix
        - :class:`Trigger`  | the child pipeline or other project's pipeline the job starts
          - :class:`Include` | a file of the child pipeline
@@ -172,6 +174,16 @@ class IncludeKind(StringEnum):
 	Template =  "template"   #: A CI/CD template shipped with GitLab.
 	Component = "component"  #: A CI/CD component.
 	Artifact =  "artifact"   #: A file a job of the pipeline created, for a dynamic child pipeline.
+
+
+@export
+class InputType(StringEnum):
+	"""The type of an input, as ``type`` names it."""
+
+	String =  "string"   #: A string.
+	Number =  "number"   #: A number.
+	Boolean = "boolean"  #: ``true`` or ``false``.
+	Array =   "array"    #: A list of values.
 
 
 @export
@@ -376,29 +388,33 @@ class PipelineFile(Base[None]):
 	dot is a hidden job: GitLab doesn't run it, other jobs extend it.
 	"""
 
-	_path:       Path                       #: Path to the configuration file.
-	_stages:     Nullable[tuple[str, ...]]  #: Stages, as the ``stages`` key declares them.
-	_variables:  dict[str, Variable]        #: Default variables, by name, in file order.
-	_jobs:       dict[str, Job]             #: Jobs, by name, in file order.
-	_hiddenJobs: dict[str, Job]             #: Hidden jobs, by name, in file order.
-	_workflow:   Nullable[Workflow]         #: The ``workflow`` key.
-	_includes:   list[Include]              #: Entries of ``include``, in file order.
-	_default:    Nullable[Default]          #: The ``default`` key.
+	_path:        Path                       #: Path to the configuration file.
+	_stages:      Nullable[tuple[str, ...]]  #: Stages, as the ``stages`` key declares them.
+	_variables:   dict[str, Variable]        #: Default variables, by name, in file order.
+	_jobs:        dict[str, Job]             #: Jobs, by name, in file order.
+	_hiddenJobs:  dict[str, Job]             #: Hidden jobs, by name, in file order.
+	_workflow:    Nullable[Workflow]         #: The ``workflow`` key.
+	_includes:    list[Include]              #: Entries of ``include``, in file order.
+	_default:     Nullable[Default]          #: The ``default`` key.
+	_inputs:      dict[str, Input]           #: Inputs of the header's ``spec:inputs``, by name, in file order.
+	_description: Nullable[str]              #: Description of the header's ``spec:description``.
 
 	def __init__(
 		self,
-		path:      Path,
-		stages:    Nullable[Iterable[str]]      = None,
-		variables: Nullable[Iterable[Variable]] = None,
-		jobs:      Nullable[Iterable[Job]]      = None,
-		workflow:  Nullable[Workflow]           = None,
-		includes:  Nullable[Iterable[Include]]  = None,
-		default:   Nullable[Default]            = None
+		path:        Path,
+		stages:      Nullable[Iterable[str]]      = None,
+		variables:   Nullable[Iterable[Variable]] = None,
+		jobs:        Nullable[Iterable[Job]]      = None,
+		workflow:    Nullable[Workflow]           = None,
+		includes:    Nullable[Iterable[Include]]  = None,
+		default:     Nullable[Default]            = None,
+		inputs:      Nullable[Iterable[Input]]    = None,
+		description: Nullable[str]                = None
 	) -> None:
 		"""
 		Initializes a configuration file.
 
-		A variable, job, workflow, include or default is attached by passing it, or by constructing it with the
+		A variable, job, workflow, include, default or input is attached by passing it, or by constructing it with the
 		configuration file as parent. Use :meth:`FromFile` to read a configuration file.
 
 		:param path:        Path to the configuration file.
@@ -409,6 +425,9 @@ class PipelineFile(Base[None]):
 		:param workflow:    Optional, the ``workflow`` key, which is attached to the file. Default: ``None``.
 		:param includes:    Optional, entries of ``include``, which are attached to the file. Default: ``None``.
 		:param default:     Optional, the ``default`` key, which is attached to the file. Default: ``None``.
+		:param inputs:      Optional, inputs of the header's ``spec:inputs``, which are attached to the file. Default:
+		                    ``None``.
+		:param description: Optional, description of the header's ``spec:description``. Default: ``None``.
 		:raises ValueError: If parameter 'path' is ``None``.
 		:raises TypeError:  If parameter 'path' is not of type :class:`~pathlib.Path`.
 		:raises TypeError:  If an element of parameter 'stages' is not of type :class:`str`.
@@ -417,6 +436,8 @@ class PipelineFile(Base[None]):
 		:raises TypeError:  If parameter 'workflow' is not of type :class:`Workflow`.
 		:raises TypeError:  If an element of parameter 'includes' is not of type :class:`Include`.
 		:raises TypeError:  If parameter 'default' is not of type :class:`Default`.
+		:raises TypeError:  If an element of parameter 'inputs' is not of type :class:`Input`.
+		:raises TypeError:  If parameter 'description' is not of type :class:`str`.
 		"""
 		super().__init__(1)
 
@@ -425,6 +446,11 @@ class PipelineFile(Base[None]):
 		elif not isinstance(path, Path):
 			ex = TypeError("Parameter 'path' is not of type 'Path'.")
 			ex.add_note(f"Got type '{getFullyQualifiedName(path)}'.")
+			raise ex
+
+		if description is not None and not isinstance(description, str):
+			ex = TypeError("Parameter 'description' is not of type 'str'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(description)}'.")
 			raise ex
 
 		self._pipelineFile = self
@@ -436,6 +462,8 @@ class PipelineFile(Base[None]):
 		self._workflow =     None
 		self._includes =     []
 		self._default =      None
+		self._inputs =       {}
+		self._description =  description
 
 		if stages is not None:
 			self._stages = tuple(stages)
@@ -493,6 +521,16 @@ class PipelineFile(Base[None]):
 			self._default = default
 			default.Parent = self
 
+		if inputs is not None:
+			for parameter in inputs:
+				if not isinstance(parameter, Input):
+					ex = TypeError("An element of parameter 'inputs' is not of type 'Input'.")
+					ex.add_note(f"Got type '{getFullyQualifiedName(parameter)}'.")
+					raise ex
+
+				self._inputs[parameter._name] = parameter
+				parameter.Parent = self
+
 	@Base.Parent.setter
 	def Parent(self, value: None) -> None:
 		ex = TypeError(f"A '{getFullyQualifiedName(self)}' has no parent.")
@@ -507,6 +545,24 @@ class PipelineFile(Base[None]):
 		:returns: The path.
 		"""
 		return self._path
+
+	@readonly
+	def Inputs(self) -> dict[str, Input]:
+		"""
+		Read-only property to access the inputs of the header's ``spec:inputs`` (:attr:`_inputs`).
+
+		:returns: The inputs, by name, in file order.
+		"""
+		return self._inputs
+
+	@readonly
+	def Description(self) -> Nullable[str]:
+		"""
+		Read-only property to access the description of the header's ``spec:description`` (:attr:`_description`).
+
+		:returns: The description, or ``None`` if the file gives none.
+		"""
+		return self._description
 
 	@readonly
 	def DeclaredStages(self) -> Nullable[tuple[str, ...]]:
@@ -644,6 +700,7 @@ class PipelineFile(Base[None]):
 		                           ``spec`` key.
 		:raises PipelineFileError: If the configuration is not a mapping.
 		:raises PipelineFileError: If a key holds a value of the wrong kind.
+		:raises PipelineFileError: If an input is malformed, or its default doesn't match its type or options.
 		:raises PipelineFileError: If a job is in a stage the pipeline doesn't have. |br|
 		                           The note lists the stages.
 		:raises PipelineFileError: If a job needs a job the file doesn't have, or the jobs need each other in a cycle. |br|
@@ -670,6 +727,7 @@ class PipelineFile(Base[None]):
 			line = None if mark is None else mark.line + 1
 			raise PipelineFileError("Configuration file is not a YAML document.", path, line) from cause
 
+		header = None
 		if len(documents) > 2:
 			raise PipelineFileError("Configuration file holds more than two documents.", path)
 		elif len(documents) == 2:
@@ -685,20 +743,23 @@ class PipelineFile(Base[None]):
 			ex.add_note(f"Got type '{getFullyQualifiedName(document)}'.")
 			raise ex
 
-		pipelineFile = cls._Parse(document, path)
+		pipelineFile = cls._Parse(document, path, header)
 		pipelineFile._Validate()
 
 		return pipelineFile
 
 	@classmethod
-	def _Parse(cls, document: CommentedMap, path: Path) -> Self:
+	def _Parse(cls, document: CommentedMap, path: Path, header: Nullable[CommentedMap] = None) -> Self:
 		"""
-		Build a configuration file and the elements it contains from the configuration document read from it.
+		Build a configuration file and the elements it contains from the documents read from it.
 
 		:param document:           The configuration, a mapping.
 		:param path:               Path to the configuration file.
+		:param header:             Optional, the header document, a mapping with key ``spec``. Default: ``None``.
 		:returns:                  The configuration file, with its variables, jobs, workflow, includes and default
 		                           attached.
+		:raises PipelineFileError: If key ``spec`` or ``spec:inputs`` of the header is not a mapping, or an input is
+		                           malformed.
 		:raises PipelineFileError: If key ``stages`` is not a list.
 		:raises PipelineFileError: If key ``variables``, ``workflow`` or a job is not a mapping.
 		:raises PipelineFileError: If a job extends a job, or a ``!reference`` tag refers to a key, the file doesn't have,
@@ -735,7 +796,22 @@ class PipelineFile(Base[None]):
 
 		default = Default._FromYAML(document, path)
 
-		return cls(path, stages, variables, jobs, workflow, includes, default)
+		inputs = None
+		description = None
+		if header is not None:
+			spec = header["spec"]
+			if not isinstance(spec, CommentedMap):
+				ex = PipelineFileError("Key 'spec' of the header is not a mapping.", path, Base._KeyLine(header, "spec"))
+				ex.add_note(f"Got type '{getFullyQualifiedName(spec)}'.")
+				raise ex
+
+			if "inputs" in spec:
+				inputs = Input._FromYAMLMapping(spec["inputs"], None, path, Base._KeyLine(spec, "inputs"))
+
+			if (description := spec.get("description", None)) is not None:
+				description = Base._ToText(description)
+
+		return cls(path, stages, variables, jobs, workflow, includes, default, inputs, description)
 
 	@classmethod
 	def _ResolveJobs(cls, document: CommentedMap, path: Path) -> dict[str, tuple[CommentedMap, list[str]]]:
@@ -954,12 +1030,14 @@ class PipelineFile(Base[None]):
 		"""
 		Validate that every job is in a stage of the pipeline.
 
+		A stage interpolating an input, as ``$[[ inputs.stage ]]``, is known when the file is included only.
+
 		:raises PipelineFileError: If a job is in a stage the pipeline doesn't have. |br|
 		                           The note lists the stages.
 		"""
 		stages = self.Stages
 		for job in self._jobs.values():
-			if job._stage not in stages:
+			if job._stage not in stages and "$[[" not in job._stage:
 				ex = PipelineFileError(
 					f"Job '{job._name}' is in stage '{job._stage}', which isn't declared.", self._path, job._line
 				)
@@ -970,6 +1048,8 @@ class PipelineFile(Base[None]):
 		"""
 		Validate that every job needs only jobs of the file, unless the need is optional or refers to another pipeline.
 
+		A job's name interpolating an input is known when the file is included only.
+
 		:raises PipelineFileError: If a job needs a job the file doesn't have. |br|
 		                           The note lists the file's jobs.
 		"""
@@ -978,12 +1058,14 @@ class PipelineFile(Base[None]):
 				continue
 
 			for need in job._needs:
-				if need._kind is NeedKind.Job and not need._optional and need._job not in self._jobs:
-					ex = PipelineFileError(
-						f"Job '{job._name}' needs job '{need._job}', which the file doesn't have.", self._path, need._line
-					)
-					ex.add_note(f"Jobs: {', '.join(self._jobs)}.")
-					raise ex
+				if need._kind is not NeedKind.Job or need._optional or need._job in self._jobs or "$[[" in need._job:
+					continue
+
+				ex = PipelineFileError(
+					f"Job '{job._name}' needs job '{need._job}', which the file doesn't have.", self._path, need._line
+				)
+				ex.add_note(f"Jobs: {', '.join(self._jobs)}.")
+				raise ex
 
 	def _ValidateAcyclic(self) -> None:
 		"""
@@ -1043,6 +1125,7 @@ class Job(Base[PipelineFile]):
 	_tags:             tuple[str, ...]       #: Tags selecting the runner.
 	_environment:      Nullable[str]         #: Name of the environment the job deploys to.
 	_variables:        dict[str, Variable]   #: Variables of the job, by name, in file order.
+	_inputs:           dict[str, Input]      #: Inputs of the job, by name, in file order.
 	_parallel:         Nullable[Parallel]    #: The job's ``parallel``.
 	_trigger:          Nullable[Trigger]     #: The pipeline the job starts.
 	_extends:          tuple[str, ...]       #: Names of the jobs this job extends.
@@ -1066,6 +1149,7 @@ class Job(Base[PipelineFile]):
 		environment:      Nullable[str]                = None,
 		variables:        Nullable[Iterable[Variable]] = None,
 		rules:            Nullable[Iterable[Rule]]     = None,
+		inputs:           Nullable[Iterable[Input]]    = None,
 		parallel:         Nullable[Parallel]           = None,
 		trigger:          Nullable[Trigger]            = None,
 		extends:          Nullable[Iterable[str]]      = None,
@@ -1076,8 +1160,8 @@ class Job(Base[PipelineFile]):
 		"""
 		Initializes a job.
 
-		A need, a variable, a rule, a parallel or a trigger is attached by passing it, or by constructing it with the job as
-		parent.
+		A need, a variable, a rule, an input, a parallel or a trigger is attached by passing it, or by constructing it with
+		the job as parent.
 
 		:param name:             Name of the job, the key it is declared under.
 		:param line:             Line the job's name is written at, starting at 1.
@@ -1097,6 +1181,7 @@ class Job(Base[PipelineFile]):
 		:param variables:        Optional, variables of the job, which are attached to the job. Default: ``None``.
 		:param rules:            Optional, rules deciding whether the job is added to a pipeline, which are attached to
 		                         the job. Default: ``None``.
+		:param inputs:           Optional, inputs of the job, which are attached to the job. Default: ``None``.
 		:param parallel:         Optional, the job's ``parallel``, which is attached to the job. Default: ``None``.
 		:param trigger:          Optional, the pipeline the job starts, which is attached to the job. Default: ``None``.
 		:param extends:          Optional, names of the jobs this job extends. Default: ``None``.
@@ -1115,6 +1200,7 @@ class Job(Base[PipelineFile]):
 		:raises TypeError:       If an element of parameter 'needs' is not of type :class:`Need`.
 		:raises TypeError:       If an element of parameter 'variables' is not of type :class:`Variable`.
 		:raises TypeError:       If an element of parameter 'rules' is not of type :class:`Rule`.
+		:raises TypeError:       If an element of parameter 'inputs' is not of type :class:`Input`.
 		:raises TypeError:       If parameter 'parallel' is not of type :class:`Parallel`.
 		:raises TypeError:       If parameter 'trigger' is not of type :class:`Trigger`.
 		"""
@@ -1185,6 +1271,7 @@ class Job(Base[PipelineFile]):
 		self._stage =        stage
 		self._needs =        None
 		self._rules =        []
+		self._inputs =       {}
 		self._parallel =     None
 		self._trigger =      None
 		self._when =         when
@@ -1224,6 +1311,16 @@ class Job(Base[PipelineFile]):
 				self._rules.append(rule)
 				rule.Parent = self
 
+		if inputs is not None:
+			for parameter in inputs:
+				if not isinstance(parameter, Input):
+					ex = TypeError("An element of parameter 'inputs' is not of type 'Input'.")
+					ex.add_note(f"Got type '{getFullyQualifiedName(parameter)}'.")
+					raise ex
+
+				self._inputs[parameter._name] = parameter
+				parameter.Parent = self
+
 		for parameterName, element, elementClass in (
 			("parallel", parallel, Parallel),
 			("trigger",  trigger,  Trigger)
@@ -1256,6 +1353,9 @@ class Job(Base[PipelineFile]):
 
 		for rule in self._rules:
 			rule.Parent = self
+
+		for parameter in self._inputs.values():
+			parameter.Parent = self
 
 		for element in (self._parallel, self._trigger):
 			if element is not None:
@@ -1344,6 +1444,15 @@ class Job(Base[PipelineFile]):
 		:returns: The rules, in the order GitLab evaluates them.
 		"""
 		return self._rules
+
+	@readonly
+	def Inputs(self) -> dict[str, Input]:
+		"""
+		Read-only property to access the inputs of the job (:attr:`_inputs`).
+
+		:returns: The inputs, by name, in file order.
+		"""
+		return self._inputs
 
 	@readonly
 	def Parallel(self) -> Nullable[Parallel]:
@@ -1591,6 +1700,10 @@ class Job(Base[PipelineFile]):
 		if "rules" in mapping:
 			rules = Rule._FromYAMLEntries(mapping["rules"], f"job '{name}'", path, Base._KeyLine(mapping, "rules"))
 
+		inputs = None
+		if "inputs" in mapping:
+			inputs = Input._FromYAMLMapping(mapping["inputs"], name, path, Base._KeyLine(mapping, "inputs"))
+
 		parallel = None
 		if "parallel" in mapping:
 			parallel = Parallel._FromYAML(mapping["parallel"], f"job '{name}'", path, Base._KeyLine(mapping, "parallel"))
@@ -1619,6 +1732,7 @@ class Job(Base[PipelineFile]):
 			environment=cls._Name(mapping.get("environment", None)),
 			variables=variables,
 			rules=rules,
+			inputs=inputs,
 			parallel=parallel,
 			trigger=trigger,
 			extends=[Base._ToText(base) for base in extends],
@@ -3366,3 +3480,293 @@ class Parallel(Base[Union[Job, Need]]):
 			matrix.append(variables)
 
 		return cls(line, matrix=matrix)
+
+
+@export
+class Input(Base[Union[PipelineFile, Job]]):
+	"""
+	An input of the header's ``spec:inputs``, or of a job's ``inputs``.
+
+	An input of a file is a parameter of its configuration, which ``include:inputs`` or ``trigger:include:inputs`` set, or
+	the form running a pipeline by hand; it is mandatory without a default. An input of a job is set when the job is
+	run or retried by hand, and always has a default.
+	"""
+
+	_PARENT_TYPE: ClassVar[ParentTypes] = (PipelineFile, Job)  #: An input belongs to a configuration file or a job.
+
+	_name:        str                            #: Name of the input.
+	_type:        InputType                      #: Type of the input.
+	_required:    bool                           #: ``True``, if the input has no default.
+	_default:     ValueT                         #: Value of the input, if it isn't set.
+	_description: Nullable[str]                  #: Description of the input.
+	_options:     tuple[ValueT, ...]             #: Values the input may have.
+	_regex:       Nullable[str]                  #: Regular expression the input's value must match.
+	_rules:       tuple[dict[str, ValueT], ...]  #: Conditional options and defaults of ``rules``.
+
+	_KEYS: ClassVar[tuple[str, ...]] = (
+		"default", "type", "description", "options", "regex", "rules"
+	)  #: Keys of an input as mapping.
+
+	def __init__(
+		self,
+		name:        str,
+		line:        int,
+		inputType:   InputType                                = InputType.String,
+		required:    bool                                     = True,
+		default:     ValueT                                   = None,
+		description: Nullable[str]                            = None,
+		options:     Nullable[Iterable[ValueT]]               = None,
+		regex:       Nullable[str]                            = None,
+		rules:       Nullable[Iterable[Mapping[str, ValueT]]] = None,
+		*,
+		parent:      Nullable[Union[PipelineFile, Job]]       = None
+	) -> None:
+		"""
+		Initializes an input.
+
+		:param name:        Name of the input.
+		:param line:        Line the input's name is written at, starting at 1.
+		:param inputType:   Optional, type of the input. Default: :attr:`InputType.String`.
+		:param required:    Optional, ``True``, if the input has no default. Default: ``True``.
+		:param default:     Optional, value of the input, if it isn't set. Default: ``None``.
+		:param description: Optional, description of the input. Default: ``None``.
+		:param options:     Optional, values the input may have. Default: ``None``.
+		:param regex:       Optional, regular expression the input's value must match. Default: ``None``.
+		:param rules:       Optional, conditional options and defaults, each a mapping of ``if``, ``options`` and
+		                    ``default``. Default: ``None``.
+		:param parent:      Optional, reference to the configuration file or the job. Default: ``None``.
+		:raises ValueError: If parameter 'name' is ``None``.
+		:raises TypeError:  If parameter 'name' is not of type :class:`str`.
+		:raises ValueError: If parameter 'name' is empty.
+		:raises TypeError:  If parameter 'inputType' is not of type :class:`InputType`.
+		:raises TypeError:  If parameter 'required' is not of type :class:`bool`.
+		:raises TypeError:  If parameter 'description' or 'regex' is not of type :class:`str`.
+		"""
+		super().__init__(line, parent=parent)
+
+		if name is None:
+			raise ValueError("Parameter 'name' is None.")
+		elif not isinstance(name, str):
+			ex = TypeError("Parameter 'name' is not of type 'str'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(name)}'.")
+			raise ex
+		elif name == "":
+			raise ValueError("Parameter 'name' is empty.")
+
+		if not isinstance(inputType, InputType):
+			ex = TypeError("Parameter 'inputType' is not of type 'InputType'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(inputType)}'.")
+			raise ex
+
+		if not isinstance(required, bool):
+			ex = TypeError("Parameter 'required' is not of type 'bool'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(required)}'.")
+			raise ex
+
+		for parameterName, text in (
+			("description", description),
+			("regex",       regex)
+		):
+			if text is not None and not isinstance(text, str):
+				ex = TypeError(f"Parameter '{parameterName}' is not of type 'str'.")
+				ex.add_note(f"Got type '{getFullyQualifiedName(text)}'.")
+				raise ex
+
+		self._name =        name
+		self._type =        inputType
+		self._required =    required
+		self._default =     default
+		self._description = description
+		self._options =     () if options is None else tuple(options)
+		self._regex =       regex
+		self._rules =       () if rules is None else tuple(dict(rule) for rule in rules)
+
+		if parent is not None:
+			parent._inputs[name] = self
+
+	@readonly
+	def Name(self) -> str:
+		"""
+		Read-only property to access the input's name (:attr:`_name`).
+
+		:returns: Name of the input.
+		"""
+		return self._name
+
+	@readonly
+	def Type(self) -> InputType:
+		"""
+		Read-only property to access the input's type (:attr:`_type`).
+
+		:returns: The ``type`` key, :attr:`InputType.String` if the input doesn't say.
+		"""
+		return self._type
+
+	@readonly
+	def Required(self) -> bool:
+		"""
+		Read-only property to access whether the input has to be set (:attr:`_required`).
+
+		:returns: ``True``, if the input has no ``default`` key.
+		"""
+		return self._required
+
+	@readonly
+	def Default(self) -> ValueT:
+		"""
+		Read-only property to access the input's value, if it isn't set (:attr:`_default`).
+
+		:returns: The default, with the type it is written with, or ``None`` if the input has none.
+		"""
+		return self._default
+
+	@readonly
+	def Description(self) -> Nullable[str]:
+		"""
+		Read-only property to access the input's description (:attr:`_description`).
+
+		:returns: The description, or ``None`` if the input gives none.
+		"""
+		return self._description
+
+	@readonly
+	def Options(self) -> tuple[ValueT, ...]:
+		"""
+		Read-only property to access the values the input may have (:attr:`_options`).
+
+		:returns: The options, in file order; empty if the input may have any value.
+		"""
+		return self._options
+
+	@readonly
+	def Regex(self) -> Nullable[str]:
+		"""
+		Read-only property to access the regular expression the input's value must match (:attr:`_regex`).
+
+		:returns: The expression, as written, or ``None``.
+		"""
+		return self._regex
+
+	@readonly
+	def Rules(self) -> tuple[dict[str, ValueT], ...]:
+		"""
+		Read-only property to access the input's conditional options and defaults (:attr:`_rules`).
+
+		:returns: The rules, each mapping ``if``, ``options`` and ``default``, in the order GitLab evaluates them.
+		"""
+		return self._rules
+
+	def __str__(self) -> str:
+		"""
+		Return the input's name.
+
+		:returns: Name of the input.
+		"""
+		return self._name
+
+	@classmethod
+	def _FromYAML(cls, name: str, declaration: Any, jobName: Nullable[str], path: Path, line: int) -> Self:
+		"""
+		Read an input's declaration: empty, or a mapping of the keys in :attr:`_KEYS`.
+
+		:param name:               Name of the input.
+		:param declaration:        The declaration.
+		:param jobName:            Name of the job declaring the input, or ``None`` for ``spec:inputs``.
+		:param path:               Path to the configuration file.
+		:param line:               Line the input's name is written at, starting at 1.
+		:returns:                  The input.
+		:raises PipelineFileError: If the declaration is neither empty nor a mapping.
+		:raises PipelineFileError: If the mapping has a key GitLab doesn't know for an input. |br|
+		                           The note lists the allowed keys.
+		:raises PipelineFileError: If key ``type`` is not an input type. |br|
+		                           The note lists the allowed values.
+		:raises PipelineFileError: If an input of a job has no default.
+		:raises PipelineFileError: If the default doesn't match the type, or isn't one of the options.
+		:raises PipelineFileError: If key ``options`` or ``rules`` is not a list, or ``regex`` is used with a type other
+		                           than ``string``.
+		"""
+		subject = f"input '{name}'" if jobName is None else f"input '{name}' of job '{jobName}'"
+		if declaration is None:
+			declaration = CommentedMap()
+		elif not isinstance(declaration, CommentedMap):
+			ex = PipelineFileError(f"I{subject[1:]} is not a mapping.", path, line)
+			ex.add_note(f"Got type '{getFullyQualifiedName(declaration)}'.")
+			raise ex
+
+		for key in declaration:
+			if key not in cls._KEYS:
+				ex = PipelineFileError(f"I{subject[1:]} has unknown key '{key}'.", path, Base._KeyLine(declaration, key))
+				ex.add_note(f"Allowed keys: {', '.join(cls._KEYS)}.")
+				raise ex
+
+		try:
+			inputType = InputType.Parse(Base._ToText(declaration.get("type", "string")))
+		except ValueError as cause:
+			ex = PipelineFileError(f"Key 'type' of {subject} is not an input type.", path, line)
+			ex.add_note(f"Got '{declaration['type']}'.")
+			ex.add_note(f"Allowed values: {', '.join(member.value for member in InputType)}.")
+			raise ex from cause
+
+		required = "default" not in declaration
+		if required and jobName is not None:
+			raise PipelineFileError(f"I{subject[1:]} has no default.", path, line)
+
+		for key in ("options", "rules"):
+			if key in declaration and not isinstance(declaration[key], CommentedSeq):
+				ex = PipelineFileError(
+					f"Key '{key}' of {subject} is not a list.", path, Base._KeyLine(declaration, key)
+				)
+				ex.add_note(f"Got type '{getFullyQualifiedName(declaration[key])}'.")
+				raise ex
+
+		default = Base._ToPython(declaration.get("default", None))
+		options = Base._ToPython(declaration.get("options", []))
+		types = {
+			InputType.String:  (str, ),
+			InputType.Number:  (int, float),
+			InputType.Boolean: (bool, ),
+			InputType.Array:   (list, )
+		}[inputType]
+		if default is not None and (not isinstance(default, types) or (isinstance(default, bool) and bool not in types)):
+			ex = PipelineFileError(f"Default of {subject} is not of type '{inputType.value}'.", path, line)
+			ex.add_note(f"Got '{default}'.")
+			raise ex
+		elif default is not None and len(options) > 0 and default not in options:
+			ex = PipelineFileError(f"Default of {subject} is not one of its options.", path, line)
+			ex.add_note(f"Options: {', '.join(str(option) for option in options)}.")
+			raise ex
+		elif "regex" in declaration and inputType is not InputType.String:
+			raise PipelineFileError(f"Key 'regex' of {subject} needs type 'string'.", path, line)
+
+		description = declaration.get("description", None)
+		regex = declaration.get("regex", None)
+		return cls(
+			name, line, inputType, required, default,
+			description=None if description is None else Base._ToText(description),
+			options=options,
+			regex=None if regex is None else Base._ToText(regex),
+			rules=Base._ToPython(declaration.get("rules", []))
+		)
+
+	@classmethod
+	def _FromYAMLMapping(cls, mapping: Any, jobName: Nullable[str], path: Path, line: int) -> list[Self]:
+		"""
+		Read the inputs of ``spec:inputs`` or of a job's ``inputs``.
+
+		:param mapping:            The key's value.
+		:param jobName:            Name of the job declaring the inputs, or ``None`` for ``spec:inputs``.
+		:param path:               Path to the configuration file.
+		:param line:               Line the key is written at, starting at 1.
+		:returns:                  The inputs, in file order.
+		:raises PipelineFileError: If the value is not a mapping.
+		:raises PipelineFileError: If an input is malformed.
+		"""
+		if not isinstance(mapping, CommentedMap):
+			message = "Key 'spec:inputs'" if jobName is None else f"Key 'inputs' of job '{jobName}'"
+			ex = PipelineFileError(f"{message} is not a mapping.", path, line)
+			ex.add_note(f"Got type '{getFullyQualifiedName(mapping)}'.")
+			raise ex
+
+		return [
+			cls._FromYAML(str(name), value, jobName, path, Base._KeyLine(mapping, name)) for name, value in mapping.items()
+		]
