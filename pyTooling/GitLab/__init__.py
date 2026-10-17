@@ -50,22 +50,169 @@ __documentation_url__ = "https://pyTooling.github.io/pyTooling.GitLab"
 __issue_tracker_url__ = "https://GitHub.com/pyTooling/pyTooling.GitLab/issues"
 
 from datetime                  import datetime, timezone
-from typing                    import Optional as Nullable, Any, ClassVar, Hashable, Iterable, Mapping, Self
+from http                      import HTTPMethod
+from json                      import loads as json_loads
+from typing                    import Optional as Nullable, Any, ClassVar, Hashable, Iterable, Mapping, Self, Union
 
 from pyTooling.CI              import CIError, JSONObject, MatrixInstanceMixin, Outcome
 from pyTooling.CI              import Job as CIJob, JobGroup as CIJobGroup, Matrix as CIMatrix
+from pyTooling.CI              import Pipeline as CIPipeline, PipelineGroup as CIPipelineGroup
 from pyTooling.Common          import getFullyQualifiedName, parseISO8601Timestamp, StringEnum
 from pyTooling.Decorators      import export, readonly
 from pyTooling.GenericPath.URL import URL
 from pyTooling.MetaClasses     import ExtendedType
+from pyTooling.REST            import MediaType, RESTClient, RESTError
 
 
-__all__ = ["STATUS_TO_OUTCOME", "TIMEOUT_FAILURE_REASONS"]
+__all__ = ["GITLAB_API_URL", "STATUS_TO_OUTCOME", "TIMEOUT_FAILURE_REASONS"]
 
 
 @export
 class GitLabError(CIError):
 	"""Base-exception of all exceptions raised by :mod:`pyTooling.GitLab`."""
+
+
+GITLAB_API_URL = URL.Parse("https://gitlab.com/api/v4")
+"""Base URL of the REST API of gitlab.com."""
+
+
+@export
+class ProjectClient(RESTClient):
+	"""
+	A client of the GitLab REST API for one project.
+
+	A reader of a project's data derives from it. The requests themselves - the retries, the pagination and the
+	token's boundary - are :class:`~pyTooling.REST.RESTClient`'s. GitLab answers a list as a JSON array rather than a
+	JSON object, so this client reads arrays too, with :meth:`GetJSONArray`.
+	"""
+
+	_project: str  #: The project, as its numeric identifier or its path.
+
+	def __init__(
+		self,
+		project:    Union[int, str],
+		token:      Nullable[str] = None,
+		*,
+		apiURL:     Union[str, URL] = GITLAB_API_URL,
+		timeout:    float = 30.0,
+		retries:    int = 3,
+		retryDelay: float = 2.0
+	) -> None:
+		"""
+		Initializes a client for one project.
+
+		:param project:     The project, as its numeric identifier, e.g. ``74823``, or as its path, e.g.
+		                    ``gitlab-org/gitlab-development-kit``.
+		:param token:       Optional, token authorizing the requests. Default: anonymous requests.
+		:param apiURL:      Optional, base URL of the GitLab REST API, e.g. of a self-managed instance.
+		                    Default: :data:`GITLAB_API_URL`.
+		:param timeout:     Optional, timeout of a single request in seconds. Default: ``30.0``.
+		:param retries:     Optional, how often a transiently failing request is tried again. ``0`` tries once.
+		                    Default: ``3``.
+		:param retryDelay:  Optional, pause in seconds before a request is tried again the first time. The pause doubles
+		                    with every further attempt. Default: ``2.0``.
+		:raises ValueError: If parameter 'project' is ``None``.
+		:raises TypeError:  If parameter 'project' is neither of type :class:`int` nor :class:`str`.
+		:raises ValueError: If parameter 'project' is a negative number, an empty path, or a path with an empty part.
+		:raises TypeError:  If a parameter of :class:`~pyTooling.REST.RESTClient` has the wrong type.
+		:raises ValueError: If a parameter of :class:`~pyTooling.REST.RESTClient` has an invalid value.
+		"""
+		super().__init__(apiURL, token, timeout=timeout, retries=retries, retryDelay=retryDelay)
+
+		if project is None:
+			raise ValueError("Parameter 'project' is None.")
+		elif isinstance(project, bool) or not isinstance(project, (int, str)):
+			ex = TypeError("Parameter 'project' is neither of type 'int' nor 'str'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(project)}'.")
+			raise ex
+		elif isinstance(project, int) and project < 0:
+			ex = ValueError("Parameter 'project' is a negative number.")
+			ex.add_note(f"Got value '{project}'.")
+			raise ex
+		elif isinstance(project, str) and (project == "" or "" in project.split("/")):
+			ex = ValueError("Parameter 'project' is an empty path or has an empty part.")
+			ex.add_note(f"Got value '{project}'.")
+			raise ex
+
+		self._project = str(project)
+
+	@readonly
+	def Project(self) -> str:
+		"""
+		Read-only property to access the project, as its numeric identifier or its path (:attr:`_project`).
+
+		:returns: The project's identifier or path, as given.
+		"""
+		return self._project
+
+	@readonly
+	def ProjectResourcePath(self) -> str:
+		"""
+		Read-only property to return the project's resource path below the API.
+
+		A project's path is URL-encoded, so ``gitlab-org/cli`` becomes ``projects/gitlab-org%2Fcli``.
+
+		:returns: The resource path of the project.
+		"""
+		return f"projects/{self._project.replace('/', '%2F')}"
+
+	def GetJSONArray(self, resourcePath: str, pageSize: int = 100) -> list[JSONObject]:
+		"""
+		Read a list GitLab answers as a JSON array, following its pages.
+
+		:param resourcePath: Path of the resource below :attr:`~pyTooling.REST.RESTClient.APIURL`.
+		:param pageSize:     Optional, number of entries per page, at most 100. Default: ``100``.
+		:returns:            The entries of every page, in the order GitLab answered them.
+		:raises ValueError:  If parameter 'pageSize' is not in range 1..100.
+		:raises RESTError:   If a request fails, or an answer isn't a JSON array.
+		"""
+		if not (1 <= pageSize <= 100):
+			ex = ValueError("Parameter 'pageSize' is out of range 1..100.")
+			ex.add_note(f"Got value '{pageSize}'.")
+			raise ex
+
+		separator = "&" if "?" in resourcePath else "?"
+		entries: list[JSONObject] = []
+		nextResourcePath: Nullable[str] = f"{resourcePath}{separator}per_page={pageSize}"
+		while nextResourcePath is not None:
+			document, nextResourcePath = self._Request(HTTPMethod.GET, nextResourcePath)
+			if not isinstance(document, list):
+				raise RESTError(f"API didn't answer with a JSON array: {self._apiURL / resourcePath}")
+
+			entries.extend(document)
+
+		return entries
+
+	def _ProcessAnswer(self, body: bytes, contentType: Nullable[str], url: URL) -> Nullable[Union[JSONObject, list[Any]]]:
+		"""
+		Read an answer's body as a JSON object or a JSON array.
+
+		:param body:        The answer's body.
+		:param contentType: The answer's ``Content-Type`` header, or ``None``.
+		:param url:         The URL that was requested.
+		:returns:           The JSON object or array, or ``None`` if the answer had no body.
+		:raises RESTError:  If the answer's media type isn't JSON. |br|
+		                    The note reports the media type that was announced.
+		:raises RESTError:  If the answer isn't valid JSON.
+		:raises RESTError:  If the answer is JSON, but neither a JSON object nor a JSON array.
+		"""
+		if len(body) == 0:
+			return None
+
+		if contentType is not None and not MediaType.JSON.Matches(contentType):
+			error = RESTError(f"API didn't answer with JSON: {url}")
+			error.add_note(f"Got 'Content-Type: {contentType}'.")
+			raise error
+
+		try:
+			document = json_loads(body)
+		except ValueError as ex:
+			raise RESTError(f"API answered with invalid JSON: {url}") from ex
+
+		if not isinstance(document, (dict, list)):
+			raise RESTError(f"API didn't answer with a JSON object or array: {url}")
+
+		return document
 
 
 @export
@@ -338,6 +485,428 @@ class StatusMixin(metaclass=ExtendedType, mixin=True, expects=("_outcome",)):
 		:returns: The URL, or ``None`` if GitLab reported none.
 		"""
 		return self._url
+
+
+@export
+class PipelineGroup(CIPipelineGroup):
+	"""
+	Every pipeline GitLab started for one commit, and the top of the tree.
+
+	A commit can have several pipelines: a branch pipeline started by the push, a merge request pipeline, a pipeline at
+	a tag of the same commit, a scheduled one. GitLab lists a project's pipelines without its child pipelines, which
+	belong to the pipeline that triggered them (see :class:`~pyTooling.CI.Workflow`).
+
+	The group has no times of its own and derives them from its pipelines.
+	"""
+
+	def __init__(
+		self,
+		sha:           str,
+		pipelines:     Nullable[Iterable[Pipeline]]     = None,
+		*,
+		keyValuePairs: Nullable[Mapping[Hashable, Any]] = None
+	) -> None:
+		"""
+		Initializes a group of pipelines started for one commit.
+
+		:param sha:           Commit every pipeline of the group was started on.
+		:param pipelines:     Optional, the pipelines, which are attached to the group. Default: ``None``.
+		:param keyValuePairs: Optional, mapping (dictionary) of key-value-pairs. Default: ``None``.
+		:raises ValueError:   If parameter 'sha' is ``None``.
+		:raises TypeError:    If parameter 'sha' is not of type :class:`str`.
+		:raises ValueError:   If parameter 'sha' is empty.
+		:raises TypeError:    If an element of parameter 'pipelines' is not of type :class:`Pipeline`.
+		"""
+		if sha is None:
+			raise ValueError("Parameter 'sha' is None.")
+		elif not isinstance(sha, str):
+			ex = TypeError("Parameter 'sha' is not of type 'str'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(sha)}'.")
+			raise ex
+		elif sha == "":
+			raise ValueError("Parameter 'sha' is empty.")
+
+		super().__init__(sha, pipelines, keyValuePairs=keyValuePairs)
+
+	@readonly
+	def SHA(self) -> str:
+		"""
+		Read-only property to access the commit every pipeline of the group was started on (:attr:`_name`).
+
+		:returns: The commit's hash.
+		"""
+		return self._name
+
+	def ByGitReference(self) -> dict[Nullable[str], list[Pipeline]]:
+		"""
+		Group the commit's pipelines by the reference they were started on.
+
+		A commit pushed to a branch, proposed in a merge request and later tagged has its pipelines under three keys -
+		e.g. ``main``, ``refs/merge-requests/6293/merge`` and ``v1.0.0``.
+
+		:returns: Dictionary of a reference to the pipelines started on it, in the order they were reported.
+		"""
+		byReference: dict[Nullable[str], list[Pipeline]] = {}
+		for pipeline in self._pipelines:
+			if (pipelines := byReference.get(pipeline.GitReference, None)) is None:
+				pipelines = []
+				byReference[pipeline.GitReference] = pipelines
+
+			pipelines.append(pipeline)
+
+		return byReference
+
+	@classmethod
+	def Parse(
+		cls,
+		pipelines: Iterable[JSONObject],
+		jobs:      Nullable[Mapping[int, Iterable[JSONObject]]] = None,
+		sha:       Nullable[str] = None
+	) -> Self:
+		"""
+		Build a group of pipelines from the JSON objects the GitLab REST API answers with.
+
+		:param pipelines:    The pipelines, as returned by ``GET /projects/{id}/pipelines?sha=...``, or each as returned
+		                     by ``GET /projects/{id}/pipelines/{pipeline_id}``.
+		:param jobs:         Optional, the jobs of each pipeline, by the pipeline's identifier. Default: ``None``.
+		:param sha:          Optional, the commit. Default: the ``sha`` the pipelines report.
+		:returns:            The group, with its pipelines attached.
+		:raises GitLabError: If the pipelines report different commits.
+		:raises GitLabError: If no pipeline reports a commit and parameter 'sha' wasn't given.
+		"""
+		pipelineList = []
+		shas = set()
+		for json in pipelines:
+			pipelineJobs = None
+			if jobs is not None and isinstance(json, dict):
+				pipelineJobs = jobs.get(json.get("id", None), None)
+
+			pipeline = Pipeline.Parse(json, pipelineJobs)
+			pipelineList.append(pipeline)
+			if pipeline.SHA is not None:
+				shas.add(pipeline.SHA)
+
+		if sha is None:
+			if (commits := len(shas)) == 0:
+				raise GitLabError("None of the pipelines reports a 'sha', and parameter 'sha' wasn't given.")
+			elif commits > 1:
+				error = GitLabError("The pipelines report different commits.")
+				error.add_note(f"Got {', '.join(sorted(shas))}.")
+				raise error
+
+			sha = shas.pop()
+
+		return cls(sha, pipelineList)
+
+
+@export
+class PipelineContentsMixin(metaclass=ExtendedType, mixin=True, expects=("_elements", "_matrices", "_workflows")):
+	"""
+	Mixin-class for the groups holding what GitLab lists for a pipeline.
+
+	It adds the jobs GitLab lists for a pipeline.
+	"""
+
+	def _AddJobs(self, jobs: Iterable[JSONObject], path: str) -> None:
+		"""
+		Add the jobs GitLab listed for this pipeline, in the order it created them.
+
+		:param jobs:         The pipeline's jobs, as listed by ``GET .../pipelines/{pipeline_id}/jobs``.
+		:param path:         Name of the jobs' list, for an exception's message.
+		:raises TypeError:   If an element of parameter 'jobs' is not of type :class:`dict`.
+		:raises GitLabError: If a job's field ``name`` is missing.
+		:raises GitLabError: If a field holds a value GitLab doesn't document.
+		"""
+		jobList = list(jobs)
+		for position, job in enumerate(jobList):
+			if not isinstance(job, dict):
+				ex = TypeError(f"Job {position} is not of type 'dict'.")
+				ex.add_note(f"Got type '{getFullyQualifiedName(job)}'.")
+				raise ex
+
+		for position, job in sorted(enumerate(jobList), key=self._CreationOrder):
+			jobPath = f"{path}[{position}]"
+			if (fullName := job.get("name", None)) is None:
+				raise GitLabError(f"Field '{jobPath}.name' is missing.")
+
+			jobName, dimensions = _splitMatrixJobName(fullName)
+			if dimensions is None:
+				Job.Parse(job, jobPath, parent=self)
+			else:
+				if (matrix := self._matrices.get(jobName, None)) is None:
+					matrix = CIMatrix(jobName, parent=self)
+
+				MatrixJob.Parse(job, jobPath, jobName, dimensions, parent=matrix)
+
+	@staticmethod
+	def _CreationOrder(entry: tuple[int, JSONObject]) -> tuple[bool, int]:
+		"""
+		Sort the jobs GitLab listed by their identifier, which grows with a job's creation.
+
+		:param entry: A job's position in its list, and the job.
+		:returns:     The sort key; a job without identifier is placed behind every job with one.
+		"""
+		identifier = entry[1].get("id", None)
+
+		return (identifier is None, 0 if identifier is None else identifier)
+
+
+
+@export
+class Pipeline(CIPipeline, StatusMixin, PipelineContentsMixin):
+	"""
+	A pipeline.
+
+	A pipeline contains its jobs and a :class:`~pyTooling.CI.Matrix` for every job with ``parallel`` or
+	``parallel:matrix``. Several pipelines of one commit are held by a :class:`PipelineGroup`, which is the top of the
+	tree.
+	"""
+
+	_PARENT_TYPE: ClassVar[Nullable[type]] = PipelineGroup  #: A pipeline is contained in a pipeline group.
+
+	_id:             Nullable[int]     #: GitLab's identifier of the pipeline, unique on the instance.
+	_iid:            Nullable[int]     #: Number of the pipeline within its project.
+	_projectID:      Nullable[int]     #: GitLab's identifier of the project.
+	_source:         Nullable[Source]  #: What started the pipeline.
+	_gitReference:   Nullable[str]     #: Branch, tag or merge request reference the pipeline was started on.
+	_sha:            Nullable[str]     #: Commit the pipeline was started on.
+	_isTag:          Nullable[bool]    #: Whether the reference is a tag.
+	_queuedDuration: Nullable[float]   #: Seconds the pipeline waited before its first job started.
+
+	def __init__(
+		self,
+		name:           str,
+		identifier:     Nullable[int]                    = None,
+		iid:            Nullable[int]                    = None,
+		projectID:      Nullable[int]                    = None,
+		status:         Nullable[Status]                 = None,
+		createdAt:      Nullable[datetime]               = None,
+		startedAt:      Nullable[datetime]               = None,
+		completedAt:    Nullable[datetime]               = None,
+		url:            Nullable[URL]                    = None,
+		source:         Nullable[Source]                 = None,
+		gitReference:   Nullable[str]                    = None,
+		sha:            Nullable[str]                    = None,
+		isTag:          Nullable[bool]                   = None,
+		queuedDuration: Nullable[float]                  = None,
+		*,
+		keyValuePairs:  Nullable[Mapping[Hashable, Any]] = None,
+		parent:         Nullable[PipelineGroup]          = None
+	) -> None:
+		"""
+		Initializes a pipeline.
+
+		:param name:           Name of the pipeline.
+		:param identifier:     Optional, GitLab's identifier of the pipeline, unique on the instance. Default: ``None``.
+		:param iid:            Optional, number of the pipeline within its project. Default: ``None``.
+		:param projectID:      Optional, GitLab's identifier of the project. Default: ``None``.
+		:param status:         Optional, state the pipeline is in. Default: ``None``.
+		:param createdAt:      Optional, time the pipeline was created. Default: ``None``.
+		:param startedAt:      Optional, time the pipeline started. Default: ``None``.
+		:param completedAt:    Optional, time the pipeline finished. Default: ``None``.
+		:param url:            Optional, URL of the pipeline in GitLab's web interface. Default: ``None``.
+		:param source:         Optional, what started the pipeline. Default: ``None``.
+		:param gitReference:   Optional, branch, tag or merge request reference the pipeline was started on.
+		                       Default: ``None``.
+		:param sha:            Optional, commit the pipeline was started on. Default: ``None``.
+		:param isTag:          Optional, ``True``, if the reference is a tag. Default: ``None``.
+		:param queuedDuration: Optional, seconds the pipeline waited before its first job started. Default: ``None``.
+		:param keyValuePairs:  Optional, mapping (dictionary) of key-value-pairs. Default: ``None``.
+		:param parent:         Optional, reference to the group of the commit's pipelines. Default: ``None``.
+		:raises TypeError:     If parameter 'identifier' is not of type :class:`int`.
+		:raises TypeError:     If parameter 'iid' is not of type :class:`int`.
+		:raises TypeError:     If parameter 'projectID' is not of type :class:`int`.
+		:raises TypeError:     If parameter 'source' is not of type :class:`Source`.
+		:raises TypeError:     If parameter 'gitReference' is not of type :class:`str`.
+		:raises TypeError:     If parameter 'sha' is not of type :class:`str`.
+		:raises TypeError:     If parameter 'isTag' is not of type :class:`bool`.
+		:raises TypeError:     If parameter 'queuedDuration' is not of type :class:`float`.
+		"""
+		for parameterName, number in (
+			("identifier", identifier),
+			("iid",        iid),
+			("projectID",  projectID)
+		):
+			if number is not None and (isinstance(number, bool) or not isinstance(number, int)):
+				ex = TypeError(f"Parameter '{parameterName}' is not of type 'int'.")
+				ex.add_note(f"Got type '{getFullyQualifiedName(number)}'.")
+				raise ex
+
+		if source is not None and not isinstance(source, Source):
+			ex = TypeError("Parameter 'source' is not of type 'Source'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(source)}'.")
+			raise ex
+
+		for parameterName, text in (("gitReference", gitReference), ("sha", sha)):
+			if text is not None and not isinstance(text, str):
+				ex = TypeError(f"Parameter '{parameterName}' is not of type 'str'.")
+				ex.add_note(f"Got type '{getFullyQualifiedName(text)}'.")
+				raise ex
+
+		if isTag is not None and not isinstance(isTag, bool):
+			ex = TypeError("Parameter 'isTag' is not of type 'bool'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(isTag)}'.")
+			raise ex
+
+		if queuedDuration is not None and (
+			isinstance(queuedDuration, bool) or not isinstance(queuedDuration, (int, float))
+		):
+			ex = TypeError("Parameter 'queuedDuration' is not of type 'float'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(queuedDuration)}'.")
+			raise ex
+
+		super().__init__(
+			name, createdAt=createdAt, startedAt=startedAt, completedAt=completedAt, keyValuePairs=keyValuePairs,
+			parent=parent
+		)
+		StatusMixin.__init__(self, status, None, url)
+
+		self._id =             identifier
+		self._iid =            iid
+		self._projectID =      projectID
+		self._source =         source
+		self._gitReference =   gitReference
+		self._sha =            sha
+		self._isTag =          isTag
+		self._queuedDuration = None if queuedDuration is None else float(queuedDuration)
+
+	@readonly
+	def ID(self) -> Nullable[int]:
+		"""
+		Read-only property to access GitLab's identifier of the pipeline (:attr:`_id`).
+
+		The identifier is unique on the GitLab instance; :attr:`IID` numbers the pipelines of a project.
+
+		:returns: The identifier, or ``None`` if GitLab reported none.
+		"""
+		return self._id
+
+	@readonly
+	def IID(self) -> Nullable[int]:
+		"""
+		Read-only property to access the number of the pipeline within its project (:attr:`_iid`).
+
+		:returns: The number, or ``None`` if GitLab reported none.
+		"""
+		return self._iid
+
+	@readonly
+	def ProjectID(self) -> Nullable[int]:
+		"""
+		Read-only property to access GitLab's identifier of the project the pipeline belongs to (:attr:`_projectID`).
+
+		:returns: The identifier, or ``None`` if GitLab reported none.
+		"""
+		return self._projectID
+
+	@readonly
+	def Source(self) -> Nullable[Source]:
+		"""
+		Read-only property to access what started the pipeline (:attr:`_source`).
+
+		:returns: The source, or ``None`` if GitLab reported none.
+		"""
+		return self._source
+
+	@readonly
+	def GitReference(self) -> Nullable[str]:
+		"""
+		Read-only property to access the reference the pipeline was started on (:attr:`_gitReference`).
+
+		It is a branch's or a tag's name, e.g. ``main``, or a merge request's reference, e.g.
+		``refs/merge-requests/6293/merge``. :attr:`IsTag` tells a tag from a branch.
+
+		:returns: The reference, or ``None`` if GitLab reported none.
+		"""
+		return self._gitReference
+
+	@readonly
+	def SHA(self) -> Nullable[str]:
+		"""
+		Read-only property to access the commit the pipeline was started on (:attr:`_sha`).
+
+		:returns: The commit's hash, or ``None`` if GitLab reported none.
+		"""
+		return self._sha
+
+	@readonly
+	def IsTag(self) -> Nullable[bool]:
+		"""
+		Read-only property to access whether the pipeline was started on a tag (:attr:`_isTag`).
+
+		:returns: ``True``, if :attr:`GitReference` is a tag, or ``None`` if GitLab reported nothing.
+		"""
+		return self._isTag
+
+	@readonly
+	def QueuedDuration(self) -> Nullable[float]:
+		"""
+		Read-only property to access how long the pipeline waited before its first job started (:attr:`_queuedDuration`).
+
+		:returns: Seconds, as GitLab reports them, or ``None`` if GitLab reported none.
+		"""
+		return self._queuedDuration
+
+	@classmethod
+	def Parse(
+		cls,
+		pipeline: JSONObject,
+		jobs:     Nullable[Iterable[JSONObject]] = None,
+		*,
+		parent:   Nullable[PipelineGroup]        = None
+	) -> Self:
+		"""
+		Build a pipeline and its tree from the JSON objects the GitLab REST API answers with.
+
+		A pipeline without a ``name`` - GitLab reports one only when the pipeline file sets ``workflow:name`` - is named
+		by its number within the project, e.g. ``#47177``. The jobs are added in the order GitLab created them. A job
+		named as an instance of a matrix - ``test: [3.14, linux]`` or ``test 1/4`` - becomes a :class:`MatrixJob` below
+		a :class:`~pyTooling.CI.Matrix` named ``test``.
+
+		:param pipeline:     The pipeline, as returned by ``GET /projects/{id}/pipelines/{pipeline_id}``.
+		:param jobs:         Optional, the pipeline's jobs, as listed by ``GET .../pipelines/{pipeline_id}/jobs``.
+		:param parent:       Optional, reference to the group of the commit's pipelines. Default: ``None``.
+		:returns:            The pipeline, with its matrices and jobs attached.
+		:raises TypeError:   If parameter 'pipeline' is not of type :class:`dict`.
+		:raises TypeError:   If an element of parameter 'jobs' is not of type :class:`dict`.
+		:raises GitLabError: If field ``id`` is missing.
+		:raises GitLabError: If a job's field ``name`` is missing.
+		:raises GitLabError: If a field holds a value GitLab doesn't document.
+		"""
+		if not isinstance(pipeline, dict):
+			ex = TypeError("Parameter 'pipeline' is not of type 'dict'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(pipeline)}'.")
+			raise ex
+
+		if (identifier := pipeline.get("id", None)) is None:
+			raise GitLabError("Field 'pipeline.id' is missing.")
+
+		iid = pipeline.get("iid", None)
+		if (name := pipeline.get("name", None)) is None or name == "":
+			name = f"#{identifier if iid is None else iid}"
+
+		result = cls(
+			name,
+			identifier,
+			iid,
+			pipeline.get("project_id", None),
+			Status.Parse(pipeline.get("status", None)),
+			_parseISO8601Timestamp(pipeline.get("created_at", None), "pipeline.created_at"),
+			_parseISO8601Timestamp(pipeline.get("started_at", None), "pipeline.started_at"),
+			_parseISO8601Timestamp(pipeline.get("finished_at", None), "pipeline.finished_at"),
+			_parseURL(pipeline.get("web_url", None)),
+			Source.Parse(pipeline.get("source", None)),
+			pipeline.get("ref", None),
+			pipeline.get("sha", None),
+			pipeline.get("tag", None),
+			pipeline.get("queued_duration", None),
+			parent=parent
+		)
+
+		if jobs is not None:
+			result._AddJobs(jobs, "jobs")
+
+		return result
 
 
 @export

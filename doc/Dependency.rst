@@ -106,6 +106,29 @@ install the mandatory dependencies too.
 .. dependency-table:: unittest
    :caption: Dependencies for unit testing and code coverage.
 
+.. rubric:: Test Data
+
+The pipeline run model's tests use pipelines of public projects on gitlab.com, as GitLab's REST API reported them,
+reduced to the fields GitLab reports about the pipelines and jobs. They are in the repository only, not in the package;
+:ghsrc:`NOTICE.md <NOTICE.md>` lists them too.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 30 25 20
+
+   * - Content
+     - Files
+     - Source
+     - License of the source project
+   * - Pipeline 2954836704 with its jobs, its trigger job and its child pipeline
+     - :file:`tests/data/Runs/GitLabDevelopmentKit.json`
+     - `gitlab-org/gitlab-development-kit <https://gitlab.com/gitlab-org/gitlab-development-kit>`__
+     - MIT
+   * - Pipeline 2958343473 with its jobs and its trigger jobs
+     - :file:`tests/data/Runs/GitLabRunner.json`
+     - `gitlab-org/gitlab-runner <https://gitlab.com/gitlab-org/gitlab-runner>`__
+     - MIT
+
 
 .. _DEP/documentation:
 

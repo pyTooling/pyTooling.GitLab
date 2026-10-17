@@ -32,10 +32,15 @@
 Unit tests for the pipeline run model of :mod:`pyTooling.GitLab`.
 """
 from datetime              import datetime, timezone
+from json                  import dumps as json_dumps, loads as json_loads
+from pathlib               import Path
 from typing                import Any
+from unittest              import mock
 
 from pyTooling.CI          import Matrix, Outcome
-from pyTooling.GitLab      import GitLabError, Job, MatrixJob, Source, Status, STATUS_TO_OUTCOME
+from pyTooling.GitLab      import GitLabError, Job, MatrixJob, Pipeline, PipelineGroup, ProjectClient, Source, Status
+from pyTooling.GitLab      import STATUS_TO_OUTCOME
+from pyTooling.REST        import RESTError
 from pyTooling.Testing     import Testcase, testsuite, testcase
 
 
@@ -374,3 +379,402 @@ class Jobs(Testcase):
 
 				self.assertEqual(name, job.Name)
 				self.assertEqual({}, job.Dimensions)
+
+
+def _pipeline(**fields: Any) -> dict[str, Any]:
+	"""
+	Build a successful pipeline.
+
+	:param fields: Fields overriding the defaults.
+	:returns:      The pipeline, as the GitLab REST API returns it.
+	"""
+	pipeline = {
+		"id": 4711, "iid": 12, "project_id": 99, "name": None, "status": "success", "source": "push", "ref": "main",
+		"sha": "abc123", "tag": False, "created_at": _time(0), "started_at": _time(5), "finished_at": _time(600),
+		"queued_duration": 2.0, "web_url": "https://gitlab.com/group/project/-/pipelines/4711"
+	}
+	pipeline.update(fields)
+
+	return pipeline
+
+
+def _recording(name: str) -> dict[str, Any]:
+	"""
+	Read a recorded pipeline: its payloads and those of its child pipelines.
+
+	:param name: Name of the fixture file in ``tests/data/Runs``, without extension.
+	:returns:    The payloads - ``pipeline``, ``jobs``, ``bridges`` and ``downstream``.
+	"""
+	with Path(f"tests/data/Runs/{name}.json").open("r", encoding="utf-8") as file:
+		return json_loads(file.read())
+
+
+class _Response:
+	"""A fake HTTP response for :func:`urllib.request.urlopen`."""
+
+	def __init__(self, document: Any, link: str = "") -> None:
+		"""
+		Initializes a response answering with a JSON document.
+
+		:param document: The document to answer with.
+		:param link:     Optional, the response's ``Link`` header. Default: none.
+		"""
+		self._body =    json_dumps(document).encode("utf-8")
+		self.headers = {"Content-Type": "application/json", "Link": link}
+
+	def read(self) -> bytes:
+		"""
+		Return the response's body.
+
+		:returns: The JSON document's text.
+		"""
+		return self._body
+
+	def __enter__(self) -> "_Response":
+		"""
+		Enter the context and return the response.
+
+		:returns: The response.
+		"""
+		return self
+
+	def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+		"""
+		Exit the context.
+
+		:param exc_type: Exception type
+		:param exc_val:  Exception instance
+		:param exc_tb:   Exception's traceback.
+		"""
+
+
+@testsuite("Project client")
+class Client(Testcase):
+	"""The client of the GitLab REST API for one project."""
+
+	@testcase("Project")
+	def Project(self) -> None:
+		"""
+		A project is given by its identifier or its path; a path is URL-encoded in the resource path.
+
+		Checks both forms.
+		"""
+		self.assertEqual("projects/74823", ProjectClient(74823).ProjectResourcePath)
+		client = ProjectClient("gitlab-org/gitlab-development-kit")
+
+		self.assertEqual("gitlab-org/gitlab-development-kit", client.Project)
+		self.assertEqual("projects/gitlab-org%2Fgitlab-development-kit", client.ProjectResourcePath)
+		self.assertEqual("https://gitlab.com/api/v4", str(client.APIURL))
+
+	@testcase("Wrong project")
+	def WrongProject(self) -> None:
+		"""
+		A project that is ``None``, of another type, negative, or a path with an empty part is rejected.
+
+		Checks each message.
+		"""
+		with self.assertRaises(ValueError) as context:
+			ProjectClient(None)
+		self.assertEqual("Parameter 'project' is None.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			ProjectClient(1.5)
+		self.assertEqual("Parameter 'project' is neither of type 'int' nor 'str'.", str(context.exception))
+
+		with self.assertRaises(ValueError) as context:
+			ProjectClient(-1)
+		self.assertEqual("Parameter 'project' is a negative number.", str(context.exception))
+
+		with self.assertRaises(ValueError) as context:
+			ProjectClient("group//project")
+		self.assertEqual("Parameter 'project' is an empty path or has an empty part.", str(context.exception))
+
+	@testcase("Pages of an array")
+	def Pages(self) -> None:
+		"""
+		A list is read from every page GitLab links, and the token is sent as a bearer token.
+
+		Answers two pages, the first linking the second.
+		"""
+		requests = []
+
+		def urlopen(request: Any, timeout: float) -> _Response:
+			"""
+			Nested function answering a request with the page it asks for.
+
+			:param request: The request.
+			:param timeout: The request's timeout.
+			:returns:       The page.
+			"""
+			requests.append(request)
+			if request.full_url.endswith("page=2"):
+				return _Response([{"id": 3}])
+
+			nextPage = "https://gitlab.com/api/v4/projects/99/pipelines/1/jobs?per_page=100&page=2"
+			return _Response([{"id": 1}, {"id": 2}], f'<{nextPage}>; rel="next"')
+
+		with mock.patch("pyTooling.REST.urlopen", side_effect=urlopen):
+			entries = ProjectClient(99, "secret").GetJSONArray("projects/99/pipelines/1/jobs")
+
+		self.assertEqual([{"id": 1}, {"id": 2}, {"id": 3}], entries)
+		self.assertEqual("https://gitlab.com/api/v4/projects/99/pipelines/1/jobs?per_page=100", requests[0].full_url)
+		self.assertEqual("Bearer secret", requests[0].get_header("Authorization"))
+		self.assertEqual(2, len(requests))
+
+	@testcase("Not an array")
+	def NotAnArray(self) -> None:
+		"""
+		A list answered with a JSON object is an error.
+
+		Answers a JSON object.
+		"""
+		with mock.patch("pyTooling.REST.urlopen", return_value=_Response({"message": "x"})):
+			with self.assertRaises(RESTError) as context:
+				ProjectClient(99).GetJSONArray("projects/99/pipelines/1/jobs?scope=failed")
+
+		self.assertEqual(
+			"API didn't answer with a JSON array: https://gitlab.com/api/v4/projects/99/pipelines/1/jobs?scope=failed",
+			str(context.exception)
+		)
+
+	@testcase("Page size")
+	def PageSize(self) -> None:
+		"""
+		A page size out of GitLab's range 1..100 is rejected.
+
+		Checks the message and the note.
+		"""
+		with self.assertRaises(ValueError) as context:
+			ProjectClient(99).GetJSONArray("projects/99/pipelines", 101)
+
+		self.assertEqual("Parameter 'pageSize' is out of range 1..100.", str(context.exception))
+		self.assertEqual(["Got value '101'."], context.exception.__notes__)
+
+
+@testsuite("Pipelines")
+class Pipelines(Testcase):
+	"""A pipeline and a group of pipelines, read from payloads."""
+
+	@testcase("Parse")
+	def Parse(self) -> None:
+		"""
+		Every field GitLab reports about a pipeline is read; a pipeline without a name is named by its number.
+
+		Parses a successful pipeline without jobs.
+		"""
+		pipeline = Pipeline.Parse(_pipeline())
+
+		self.assertEqual("#12", pipeline.Name)
+		self.assertEqual(4711, pipeline.ID)
+		self.assertEqual(12, pipeline.IID)
+		self.assertEqual(99, pipeline.ProjectID)
+		self.assertIs(Status.Success, pipeline.Status)
+		self.assertIs(Outcome.Success, pipeline.Outcome)
+		self.assertIs(Source.Push, pipeline.Source)
+		self.assertEqual("main", pipeline.GitReference)
+		self.assertEqual("abc123", pipeline.SHA)
+		self.assertFalse(pipeline.IsTag)
+		self.assertEqual(2.0, pipeline.QueuedDuration)
+		self.assertEqual(595.0, pipeline.Duration)
+		self.assertEqual("https://gitlab.com/group/project/-/pipelines/4711", str(pipeline.URL))
+		self.assertIs(pipeline, pipeline.Pipeline)
+
+	@testcase("Named pipeline")
+	def Named(self) -> None:
+		"""
+		A pipeline named by 'workflow:name' keeps that name; without a number, it is named by its identifier.
+
+		Parses a named pipeline, and one without number.
+		"""
+		self.assertEqual("Nightly", Pipeline.Parse(_pipeline(name="Nightly")).Name)
+		self.assertEqual("#4711", Pipeline.Parse(_pipeline(iid=None)).Name)
+
+	@testcase("Jobs and matrices")
+	def JobsAndMatrices(self) -> None:
+		"""
+		Jobs are added in the order GitLab created them; matrix instances are grouped in a matrix.
+
+		Parses jobs listed newest first, as GitLab lists them.
+		"""
+		pipeline = Pipeline.Parse(_pipeline(), [
+			_job(id=104, name="test 2/2", stage="test"),
+			_job(id=103, name="test 1/2", stage="test"),
+			_job(id=102, name="lint: [ruff]", stage="test"),
+			_job(id=101, name="build")
+		])
+
+		self.assertEqual(["build"], [job.Name for job in pipeline.Jobs])
+		self.assertEqual(["lint", "test"], list(pipeline.Matrices))
+		self.assertEqual(["test 1/2", "test 2/2"], [str(job) for job in pipeline.Matrices["test"].Instances])
+		self.assertEqual(4, len(list(pipeline.IterateJobs())))
+		self.assertEqual("test 1/2", pipeline.Matrices["test"].Instances[0].QualifiedName)
+
+	@testcase("Missing identifier")
+	def MissingIdentifier(self) -> None:
+		"""
+		A pipeline without an identifier is an error.
+
+		Checks the message.
+		"""
+		with self.assertRaises(GitLabError) as context:
+			Pipeline.Parse(_pipeline(id=None))
+
+		self.assertEqual("Field 'pipeline.id' is missing.", str(context.exception))
+
+	@testcase("Wrong payloads")
+	def WrongPayloads(self) -> None:
+		"""
+		A pipeline or a job that isn't a JSON object is rejected; a job without a name is an error.
+
+		Checks each message.
+		"""
+		with self.assertRaises(TypeError) as context:
+			Pipeline.Parse([])
+		self.assertEqual("Parameter 'pipeline' is not of type 'dict'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Pipeline.Parse(_pipeline(), [_job(), "job"])
+		self.assertEqual("Job 1 is not of type 'dict'.", str(context.exception))
+
+		with self.assertRaises(GitLabError) as context:
+			Pipeline.Parse(_pipeline(), [{"id": 1}])
+		self.assertEqual("Field 'jobs[0].name' is missing.", str(context.exception))
+
+	@testcase("Parameter types")
+	def ParameterTypes(self) -> None:
+		"""
+		Each parameter of a pipeline is checked for its type.
+
+		Builds a pipeline with one wrong parameter at a time.
+		"""
+		with self.assertRaises(TypeError) as context:
+			Pipeline("p", identifier="1")
+		self.assertEqual("Parameter 'identifier' is not of type 'int'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Pipeline("p", iid=True)
+		self.assertEqual("Parameter 'iid' is not of type 'int'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Pipeline("p", projectID=1.0)
+		self.assertEqual("Parameter 'projectID' is not of type 'int'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Pipeline("p", source="push")
+		self.assertEqual("Parameter 'source' is not of type 'Source'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Pipeline("p", gitReference=1)
+		self.assertEqual("Parameter 'gitReference' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Pipeline("p", sha=1)
+		self.assertEqual("Parameter 'sha' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Pipeline("p", isTag="no")
+		self.assertEqual("Parameter 'isTag' is not of type 'bool'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Pipeline("p", queuedDuration="2")
+		self.assertEqual("Parameter 'queuedDuration' is not of type 'float'.", str(context.exception))
+
+	@testcase("Group")
+	def Group(self) -> None:
+		"""
+		A commit's pipelines form a group, grouped further by the reference they were started on.
+
+		Parses a branch pipeline and a merge request pipeline of one commit.
+		"""
+		group = PipelineGroup.Parse(
+			[_pipeline(), _pipeline(id=4712, iid=13, ref="refs/merge-requests/5/merge", source="merge_request_event")],
+			{4711: [_job()]}
+		)
+
+		self.assertEqual("abc123", group.SHA)
+		self.assertEqual(2, group.PipelineCount)
+		self.assertEqual(1, len(group.Pipelines[0].Jobs))
+		self.assertEqual(0, len(group.Pipelines[1].Jobs))
+		self.assertEqual(["main", "refs/merge-requests/5/merge"], list(group.ByGitReference()))
+		self.assertIs(Outcome.Success, group.Outcome)
+
+	@testcase("Group of several commits")
+	def GroupCommits(self) -> None:
+		"""
+		Pipelines of different commits, or of no reported commit, can't form a group without a given commit.
+
+		Checks both messages.
+		"""
+		with self.assertRaises(GitLabError) as context:
+			PipelineGroup.Parse([_pipeline(), _pipeline(id=4712, sha="def456")])
+		self.assertEqual("The pipelines report different commits.", str(context.exception))
+		self.assertEqual(["Got abc123, def456."], context.exception.__notes__)
+
+		with self.assertRaises(GitLabError) as context:
+			PipelineGroup.Parse([_pipeline(sha=None)])
+		self.assertEqual(
+			"None of the pipelines reports a 'sha', and parameter 'sha' wasn't given.", str(context.exception)
+		)
+
+		self.assertEqual("abc123", PipelineGroup.Parse([_pipeline(sha=None)], sha="abc123").SHA)
+
+	@testcase("Group commit")
+	def GroupCommit(self) -> None:
+		"""
+		A group's commit is checked.
+
+		Checks each message.
+		"""
+		with self.assertRaises(ValueError) as context:
+			PipelineGroup(None)
+		self.assertEqual("Parameter 'sha' is None.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			PipelineGroup(1)
+		self.assertEqual("Parameter 'sha' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(ValueError) as context:
+			PipelineGroup("")
+		self.assertEqual("Parameter 'sha' is empty.", str(context.exception))
+
+
+@testsuite("Recorded pipelines")
+class Recordings(Testcase):
+	"""Pipelines of public projects on gitlab.com, as the REST API reported them."""
+
+	@testcase("GitLab Development Kit")
+	def GitLabDevelopmentKit(self) -> None:
+		"""
+		A merge request pipeline with 'parallel:matrix' instances and manual jobs.
+
+		Reads the pipeline's jobs: 22 jobs, 6 matrices of 2 instances, one matrix of manual jobs, which hasn't ended.
+		"""
+		recording = _recording("GitLabDevelopmentKit")
+		pipeline = Pipeline.Parse(recording["pipeline"], recording["jobs"])
+
+		self.assertEqual("#47177", pipeline.Name)
+		self.assertIs(Source.MergeRequestEvent, pipeline.Source)
+		self.assertIs(Outcome.Success, pipeline.Outcome)
+		self.assertEqual(22, len(pipeline.Jobs))
+		self.assertEqual(6, len(pipeline.Matrices))
+		self.assertEqual(34, len(list(pipeline.IterateJobs())))
+		self.assertEqual(["rspec: [3.3]", "rspec: [3.4]"], [str(job) for job in pipeline.Matrices["rspec"].Instances])
+		self.assertIsNone(pipeline.Matrices["novel:linux-amd64"].Outcome)
+
+	@testcase("GitLab Runner")
+	def GitLabRunner(self) -> None:
+		"""
+		A merge request pipeline with instances of 'parallel: 4'.
+
+		Reads the pipeline's 86 jobs.
+		"""
+		recording = _recording("GitLabRunner")
+		pipeline = Pipeline.Parse(recording["pipeline"], recording["jobs"])
+
+		self.assertEqual(86, len(list(pipeline.IterateJobs())))
+		instances = pipeline.Matrices["integration test"].Instances
+		self.assertEqual(
+			["integration test 1/4", "integration test 2/4", "integration test 3/4", "integration test 4/4"],
+			[str(job) for job in instances]
+		)
+		self.assertEqual({"CI_NODE_INDEX": "3", "CI_NODE_TOTAL": "4"}, instances[2].Dimensions)
