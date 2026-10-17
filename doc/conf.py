@@ -267,6 +267,44 @@ todo_link_only = True
 
 
 # ==============================================================================
+# pyTooling.Sphinx - reports of domain 'report'
+# ==============================================================================
+pyTooling_Unittest_Testsuites = {
+	"src": {
+		"name":        f"{pythonProject}",
+		"xml_report":  "../report/unit/unittest.xml",
+	}
+}
+pyTooling_CodeCoverage_Packages = {
+	"src": {
+		"name":        f"{pythonProject}",
+		"json_report": "../report/coverage/coverage.json",
+		"fail_below":  80,
+		"levels":      "default"
+	}
+}
+pyTooling_DocCoverage_Packages = {
+	"src": {
+		"name":       f"{pythonProject}",
+		"directory":  f"../{directoryName}",
+		"fail_below": 80,
+		"levels":     "default"
+	}
+}
+
+
+# ==============================================================================
+# pyTooling.Sphinx - dependency tables
+# ==============================================================================
+pyTooling_Dependency_Requirements = {
+	"package":       {"file": "../requirements.txt"},
+	"unittest":      {"file": "../tests/unit/requirements.txt"},
+	"documentation": {"file": "requirements.txt"},
+}
+pyTooling_Dependency_PackageOverrides = "Dependency.PackageOverrides.yaml"
+
+
+# ==============================================================================
 # AutoAPI.Sphinx
 # ==============================================================================
 autoapi_modules = {
