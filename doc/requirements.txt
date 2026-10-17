@@ -1,0 +1,18 @@
+-r ../requirements.txt
+
+# The extension the documentation uses
+pyTooling.Sphinx @ git+https://github.com/pyTooling/pyTooling.Sphinx.git@dev
+
+# Enforce latest version on ReadTheDocs
+sphinx ~= 9.1
+docutils_stubs ~= 0.0.22
+
+# ReadTheDocs Theme
+sphinx_rtd_theme ~= 3.1
+
+# Sphinx Extenstions
+sphinxcontrib-mermaid ~= 2.1
+autoapi >= 2.0.1
+sphinx_design ~= 0.7.0
+sphinx-copybutton >= 0.5.2
+sphinx_autodoc_typehints ~= 3.13
