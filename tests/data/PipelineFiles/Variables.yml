@@ -1,0 +1,22 @@
+# A configuration declaring stages and default variables of every kind.
+stages:
+  - build
+  - test
+  - deploy
+
+variables:
+  PLAIN: "plain value"
+  NUMBER: 3.14
+  FLAG: true
+  EMPTY:
+  DEPLOY_ENVIRONMENT:
+    value: "staging"
+    description: "The deployment target."
+    options:
+      - "production"
+      - "staging"
+  DEPLOY_NOTE:
+    description: "The deployment note."
+  RAW:
+    value: "$NOT_EXPANDED"
+    expand: false
