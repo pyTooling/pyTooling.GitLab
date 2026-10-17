@@ -670,9 +670,9 @@ class Parameters(Project):
 		"""
 		An entry of a parameter the file doesn't have is a warning.
 
-		Builds an entry of the input 'unknown'.
+		Builds an entry of the input 'unknown' of a pipeline without inputs.
 		"""
-		self._Pipeline("Package", PIPELINE)
+		self._Pipeline("Package")
 		self._Build({"Package": PAGE + "\n.. glci:input:: unknown\n"})
 
 		self.assertEqual(

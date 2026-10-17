@@ -84,6 +84,23 @@ Inputs and Variables
    Documents the default variable ``<name>`` of the current pipeline file's top-level ``variables``. A variable with a
    ``description`` is prefilled in the form running a pipeline by hand. Its target is ``<Pipeline>.<name>``.
 
+.. rst:directive:: .. glci:autoinputs::
+
+   Documents every input of the current pipeline file the document has no ``glci:input`` for - also those whose
+   ``glci:input`` follows later in the document. An entry is what a ``glci:input`` without content creates: the facts
+   of the pipeline file and its ``description``.
+
+   .. code-block:: ReST
+
+      Inputs
+      ******
+
+      .. glci:input:: package_name
+
+         :Possible Values: Any valid Python package name.
+
+      .. glci:autoinputs::
+
 
 .. _GLCI/Roles:
 
