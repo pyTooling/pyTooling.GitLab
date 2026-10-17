@@ -56,7 +56,7 @@ with WarningCollector() as warnings:
 			pythonVersions=("3.11", "3.12", "3.13", "3.14", "3.15"),
 			additionalRequirements={
 				"diagram": ["matplotlib >= 3.10"],
-				"sphinx":  ["pyTooling.Sphinx ~= 0.1.0rc2"],
+				"sphinx":  ["pyTooling.Sphinx ~= 0.1.0rc3"],
 			},
 			dataFiles={
 				packageName: ["py.typed"]

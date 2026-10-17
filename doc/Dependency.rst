@@ -65,11 +65,11 @@ Python 3.12 or newer, because Sphinx 9.1 does.
 .. The extra isn't on PyPI yet, which 'dependency-table' reads extras from. Replace this table by
    '.. dependency-table:: sphinx' and an entry in 'conf.py' once a release contains the extra.
 
-+------------------+---------+------------------------------+-----------------------------------------------------+
-| Package          | Version | License                      | Dependencies                                        |
-+==================+=========+==============================+=====================================================+
-| pyTooling.Sphinx | ``dev`` | Apache-2.0                   | pyTooling[pypi], sphinx, xmlschema                  |
-+------------------+---------+------------------------------+-----------------------------------------------------+
++------------------+------------+------------------------------+-----------------------------------------------------+
+| Package          | Version    | License                      | Dependencies                                        |
++==================+============+==============================+=====================================================+
+| pyTooling.Sphinx | ~=0.1.0rc3 | Apache-2.0                   | pyTooling[pypi], sphinx, xmlschema                  |
++------------------+------------+------------------------------+-----------------------------------------------------+
 
 
 .. _DEP/testing:
