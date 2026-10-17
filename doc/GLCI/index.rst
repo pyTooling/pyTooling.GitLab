@@ -27,6 +27,8 @@ The domain's directives are described on this page's siblings:
   |rarr| ``glci:pipeline`` and the entries of its inputs and variables, and the roles referring to them.
 :ref:`GLCI/Summaries`
   |rarr| Tables, the interface, the dependencies and YAML excerpts of a pipeline file.
+:ref:`VIS/PipelineGraph`
+  |rarr| ``glci:pipeline-graph`` draws a pipeline file's jobs and their dependencies.
 
 .. contents:: Contents of this page
    :local:

@@ -1,0 +1,8 @@
+# The child pipeline the example's job 'Release' runs.
+Package:
+  stage: build
+  script: [python -m build]
+
+Publish:
+  stage: deploy
+  script: [twine upload dist/*]

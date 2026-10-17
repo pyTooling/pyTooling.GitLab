@@ -1,0 +1,37 @@
+# An example pipeline file, drawn on the page 'Pipeline Graph'.
+stages: [build, test, deploy]
+
+Build:
+  stage: build
+  script: [make]
+
+Lint:
+  stage: build
+  script: [ruff check]
+
+Test:
+  stage: test
+  parallel:
+    matrix:
+      - PYTHON: ['3.13', '3.14']
+        OS: [linux, windows]
+  script: [pytest]
+
+Documentation:
+  stage: test
+  needs: [Build]
+  rules:
+    - if: '$CI_COMMIT_TAG'
+  script: [sphinx-build doc doc/_build]
+
+Release:
+  stage: deploy
+  trigger:
+    include: /ci/release.yml
+
+Deploy:
+  stage: deploy
+  needs: [Documentation]
+  when: manual
+  trigger:
+    project: group/website

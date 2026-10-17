@@ -76,6 +76,8 @@ The pipeline files are read with ``ruamel.yaml`` when a directive runs, not when
 
    :mod:`pyTooling.GitLab.PipelineFile`
       |rarr| The model of a pipeline file the domain reads.
+   :mod:`pyTooling.GitLab.Sphinx.Graph`
+      |rarr| The ``glci:pipeline-graph`` directive, drawing a pipeline file's jobs and their dependencies.
    :mod:`pyTooling.GitLab.Sphinx.Reference`
       |rarr| The directives summarizing a pipeline file: its parameters, its interface, its dependencies, its YAML.
 """
@@ -882,19 +884,21 @@ def setup(sphinx: Sphinx) -> dict[str, Any]:
 	"""
 	Register the domain ``glci``, its directives and its configuration values with Sphinx.
 
-	The directives derive from :class:`~pyTooling.Sphinx.BaseDirective`, so the extension :mod:`pyTooling.Sphinx` is set
-	up first.
+	The directives derive from :class:`~pyTooling.Sphinx.BaseDirective` and draw graphs with
+	:mod:`sphinx.ext.graphviz`, so the extension :mod:`pyTooling.Sphinx` is set up first.
 
 	:param sphinx: The Sphinx application to register with.
 	:returns:      The extension's metadata.
 	"""
 	from pyTooling.GitLab                  import __version__
+	from pyTooling.GitLab.Sphinx.Graph     import PipelineGraph, resolveLinks
 	from pyTooling.GitLab.Sphinx.Reference import AutoInputs, Dependencies, Interface, ParameterTable, YAMLExcerpt
 	from pyTooling.GitLab.Sphinx.Reference import checkUndocumentedInputs
 
 	sphinx.setup_extension("pyTooling.Sphinx")
 
 	sphinx.add_domain(GitLabCIDomain)
+	sphinx.add_directive_to_domain("glci", "pipeline-graph", PipelineGraph)
 	sphinx.add_directive_to_domain("glci", "parameter-table", ParameterTable)
 	sphinx.add_directive_to_domain("glci", "interface", Interface)
 	sphinx.add_directive_to_domain("glci", "dependencies", Dependencies)
@@ -905,5 +909,6 @@ def setup(sphinx: Sphinx) -> dict[str, Any]:
 		sphinx.add_config_value(f"{GitLabCIDomain.name}_{configName}", default, rebuild, types)
 
 	sphinx.connect("doctree-read", checkUndocumentedInputs)
+	sphinx.connect("doctree-resolved", resolveLinks)
 
 	return {"version": __version__, "parallel_read_safe": True, "parallel_write_safe": True}
