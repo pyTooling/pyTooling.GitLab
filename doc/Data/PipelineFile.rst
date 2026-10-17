@@ -29,9 +29,12 @@ The Tree
 .. tree::
 
    - :class:`~pyTooling.GitLab.PipelineFile.PipelineFile` | a configuration file
+     - :class:`~pyTooling.GitLab.PipelineFile.Workflow`   | the ``workflow`` key
+       - :class:`~pyTooling.GitLab.PipelineFile.Rule`     | a rule deciding whether a pipeline is created
      - :class:`~pyTooling.GitLab.PipelineFile.Variable`   | a default variable, declared in the top-level ``variables``
      - :class:`~pyTooling.GitLab.PipelineFile.Job`        | a job or a hidden job, in file order
        - :class:`~pyTooling.GitLab.PipelineFile.Need`     | an entry of the job's ``needs``
+       - :class:`~pyTooling.GitLab.PipelineFile.Rule`     | a rule deciding whether the job is added to a pipeline
        - :class:`~pyTooling.GitLab.PipelineFile.Variable` | a variable of the job
 
 Every element knows its :attr:`~pyTooling.GitLab.PipelineFile.Base.Parent`, and holds a reference to the configuration
@@ -151,6 +154,36 @@ same pipeline to the jobs of the file:
 
 :meth:`~pyTooling.GitLab.PipelineFile.PipelineFile.FromFile` checks that a job needs only jobs of the file - an
 optional need may name a missing job - and that the jobs don't need each other in a cycle.
+
+
+.. _DATA/PipelineFile/Rules:
+
+Rules and Workflow
+******************
+
+A job's ``rules`` decide whether it is added to a pipeline, the ``rules`` of the ``workflow`` key whether a pipeline
+is created. GitLab evaluates them in order, and the first matching one decides; the model keeps them as written,
+without evaluating them. A :class:`~pyTooling.GitLab.PipelineFile.Rule` holds:
+
+* :attr:`~pyTooling.GitLab.PipelineFile.Rule.Condition` - the expression of ``if``;
+* :attr:`~pyTooling.GitLab.PipelineFile.Rule.Changes` and :attr:`~pyTooling.GitLab.PipelineFile.Rule.CompareTo` -
+  the paths of ``changes``, written as a list or as ``changes.paths``, and ``changes.compare_to``;
+* :attr:`~pyTooling.GitLab.PipelineFile.Rule.Exists` - the paths of ``exists``, as a list or as ``exists.paths``;
+* :attr:`~pyTooling.GitLab.PipelineFile.Rule.When`, :attr:`~pyTooling.GitLab.PipelineFile.Rule.AllowFailure` and
+  :attr:`~pyTooling.GitLab.PipelineFile.Rule.Variables` - what applies, if the rule matches.
+
+:attr:`PipelineFile.Workflow <pyTooling.GitLab.PipelineFile.PipelineFile.Workflow>` holds the
+:class:`~pyTooling.GitLab.PipelineFile.Workflow` - the pipeline's :attr:`~pyTooling.GitLab.PipelineFile.Workflow.Name`
+and its :attr:`~pyTooling.GitLab.PipelineFile.Workflow.Rules` -, or ``None`` for a file without ``workflow``:
+
+.. code-block:: yaml
+
+   workflow:
+     name: "Pipeline for $CI_COMMIT_REF_NAME"
+     rules:
+       - if: $CI_COMMIT_TAG
+         when: never
+       - when: always
 
 
 .. _DATA/PipelineFile/Lines:
