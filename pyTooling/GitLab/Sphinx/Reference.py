@@ -29,7 +29,8 @@
 # ==================================================================================================================== #
 #
 """
-Directives of the ``glci`` domain summarizing the current pipeline file: its parameters and interface.
+Directives of the ``glci`` domain summarizing the current pipeline file: its parameters, interface, dependencies and
+YAML.
 
 Each of them reads the pipeline file of the preceding ``glci:pipeline``:
 
@@ -42,11 +43,21 @@ Each of them reads the pipeline file of the preceding ``glci:pipeline``:
 
    .. glci:interface::
 
+   .. glci:dependencies::
+
+      * pip
+
+   .. glci:yaml::
+      :job: Package
+
    .. glci:autoinputs::
 
 * ``glci:parameter-table`` - the summary tables of the inputs and variables;
 * ``glci:interface`` - the contract with a pipeline including the file: the required inputs, the variables of the run
   form, the stages to declare, the jobs and hidden jobs it adds;
+* ``glci:dependencies`` - the files included, the child and downstream pipelines triggered, the container images used,
+  merged with hand-written ones;
+* ``glci:yaml`` - the pipeline file or a part of it, as a code block linked to the file on GitLab;
 * ``glci:autoinputs`` - an entry for every input the document has no ``glci:input`` for.
 
 When a document was read, an input of its pipeline file without an entry is a ``glci.drift`` warning
@@ -59,11 +70,14 @@ When a document was read, an input of its pipeline file without an entry is a ``
 """
 from __future__                      import annotations
 
-from typing                          import TYPE_CHECKING, Any, Optional as Nullable
+from pathlib                         import Path
+from typing                          import TYPE_CHECKING, Any, Callable, Optional as Nullable, TypeVar
 
 from docutils                        import nodes
+from docutils.parsers.rst            import directives
 from sphinx                          import addnodes
 from sphinx.application              import Sphinx
+from sphinx.directives.code          import container_wrapper
 from sphinx.transforms               import SphinxTransform
 from sphinx.util.logging             import getLogger
 
@@ -72,10 +86,10 @@ from pyTooling.Sphinx                import BaseDirective, SphinxExtensionError,
 from pyTooling.GitLab.Sphinx         import NO_DEFAULT, WARNING_TYPE, InputDirective, formatValue
 
 if TYPE_CHECKING:  # pragma: no cover
-	from pyTooling.GitLab.PipelineFile import PipelineFile, ValueT
+	from pyTooling.GitLab.PipelineFile import Include, PipelineFile, ValueT
 
 
-__all__ = ["KINDS", "MAX_DEFAULT_LENGTH"]
+__all__ = ["KINDS", "SECTIONS", "MAX_DEFAULT_LENGTH"]
 
 #: The kinds of parameters ``glci:parameter-table`` summarizes, in the order it shows them by default: kind |rarr| the
 #: columns.
@@ -84,10 +98,17 @@ KINDS = {
 	"variables": ("Variable Name",  "Default",  "Description"),
 }
 
+#: The parts of a pipeline file ``glci:yaml`` shows by option ``:section:``: the inputs of the header's ``spec``, and
+#: the top-level keys of the configuration.
+SECTIONS = ("inputs", "variables", "stages", "include", "workflow", "default")
+
 #: The length a default is shortened to in a summary table; a multi-line default is shortened to its first line.
 MAX_DEFAULT_LENGTH = 120
 
 _logger = getLogger(__name__)
+
+_ResultType = TypeVar("_ResultType")
+
 
 @export
 class PipelineReferenceDirective(BaseDirective):
@@ -110,6 +131,34 @@ class PipelineReferenceDirective(BaseDirective):
 			refwarn=False
 		)
 
+	def _GitLabURL(self, path: Path, first: Nullable[int] = None, last: Nullable[int] = None) -> Nullable[str]:
+		"""
+		Return the URL of a file of the documented repository on GitLab, at the documented ref.
+
+		:param path:  The file's path.
+		:param first: Optional, the first line to mark. Default: ``None``.
+		:param last:  Optional, the last line to mark. Default: ``None``.
+		:returns:     The URL, or ``None`` if ``glci_project``, ``glci_ref`` or ``glci_repository_root`` isn't configured,
+		              or the file isn't below the repository's root.
+		"""
+		project = self.config.glci_project
+		ref = self.config.glci_ref
+		if project is None or ref is None or (root := self.env.get_domain("glci").RepositoryRoot) is None:
+			return None
+
+		try:
+			relative = path.resolve().relative_to(root).as_posix()
+		except ValueError:
+			return None
+
+		url = f"{self.config.glci_server.rstrip('/')}/{project}/-/blob/{ref}/{relative}"
+		if first is None:
+			return url
+		elif last is None or last == first:
+			return f"{url}#L{first}"
+
+		return f"{url}#L{first}-{last}"
+
 	def _CurrentPipeline(self) -> Nullable[PipelineFile]:
 		"""
 		Return the model of the current pipeline file, and warn if there is no ``glci:pipeline`` before the directive.
@@ -125,6 +174,26 @@ class PipelineReferenceDirective(BaseDirective):
 			return None
 
 		return self.env.get_domain("glci").GetCurrentPipeline()
+
+	def _ResolveOrWarn(self, resolve: Callable[[], _ResultType], fallback: Callable[[], _ResultType]) -> _ResultType:
+		"""
+		Read a file a pipeline file includes or triggers, and report a file that is malformed as a warning.
+
+		:param resolve:  The operation reading the file, as :meth:`IncludeResolver.Resolve
+		                 <pyTooling.GitLab.PipelineFile.IncludeResolver.Resolve>`.
+		:param fallback: The operation giving the result, when the file couldn't be read.
+		:returns:        The result of ``resolve``, or of ``fallback`` after a warning.
+		"""
+		from pyTooling.GitLab.PipelineFile import PipelineFileError
+
+		try:
+			return resolve()
+		except PipelineFileError as ex:
+			_logger.warning(
+				f"{self.directiveName}: {ex}", location=self.get_location(), type=WARNING_TYPE, subtype="pipeline"
+			)
+			return fallback()
+
 
 @export
 class ParameterTable(PipelineReferenceDirective):
@@ -266,6 +335,7 @@ class Interface(PipelineReferenceDirective):
 	  stage given by an input, as ``$[[ inputs.stage ]]``, as written.
 	* *Jobs* and *Hidden Jobs* - the jobs the file adds to a pipeline, and the hidden jobs others may ``extends``.
 
+	The files the pipeline file includes are listed by :class:`Dependencies`.
 	"""
 
 	directiveName: str = "glci:interface"  #: Name the directive is invoked by.
@@ -324,6 +394,406 @@ class Interface(PipelineReferenceDirective):
 				body.extend(item)
 
 		return nodes.field("", nodes.field_name(text=name), nodes.field_body("", body))
+
+
+@export
+class Dependencies(PipelineReferenceDirective):
+	"""
+	The directive ``glci:dependencies``: what the current pipeline file uses, as a nested bullet list.
+
+	.. code-block:: ReST
+
+	   .. glci:dependencies::
+
+	      * /ci/build.yml
+
+	        * Python packages given by :glci:input:`Build.requirements`.
+
+	From the pipeline file, and the local files it includes and triggers, as far as they are known locally:
+
+	* the files ``include`` adds - a local file, another project's files, a URL, a template, a component, a job's
+	  artifact -, each once; a local file read from ``glci_repository_root`` with its own dependencies;
+	* the child pipelines a trigger job runs, with the files of the child pipeline, and the other projects' pipelines a
+	  trigger job starts;
+	* the images of the containers and service containers the jobs run in, ``default`` included.
+
+	The content is a bullet list of what a file can't tell, like packages installed by a script. It is merged into the
+	derived list: an item whose text is the name of a derived item - an include as written, a trigger job as
+	``trigger <job>``, a container as ``image`` or ``service``, or the image - adds its nested list to that item,
+	recursively. Any other item is appended to the list it is in. Content after the bullet list follows the list.
+	"""
+
+	directiveName: str = "glci:dependencies"  #: Name the directive is invoked by.
+
+	has_content =               True   #: The hand-written dependencies.
+	required_arguments =        0      #: Number of required directive arguments.
+	optional_arguments =        0      #: Number of optional arguments after the required ones.
+	final_argument_whitespace = False  #: A boolean; ``True`` if the last argument may contain spaces.
+	option_spec: dict[str, Any] = {}   #: Mapping of option names to validator functions.
+
+	_keys: dict[int, set[str]]  #: Names of each derived item, by the item's identity.
+
+	def run(self) -> list[nodes.Node]:
+		"""
+		Create the list: the derived dependencies, merged with the hand-written ones.
+
+		:returns: The list and the content following it, a paragraph saying *none* if there are no dependencies, or
+		          nothing without a current pipeline.
+		"""
+		if (pipelineFile := self._CurrentPipeline()) is None:
+			return []
+
+		self._keys = {}
+		dependencies = self._FileItems(pipelineFile, {pipelineFile.Path.resolve()})
+		dependencies["classes"].append("glci-dependencies")
+
+		others = []
+		for node in self.parse_content_to_nodes():
+			if isinstance(node, nodes.bullet_list):
+				self._Merge(dependencies, node)
+			else:
+				others.append(node)
+
+		if len(dependencies) == 0:
+			return [nodes.paragraph("", "", nodes.emphasis(text="none")), *others]
+
+		return [dependencies, *others]
+
+	def _Item(self, paragraph: nodes.paragraph, keys: set[str]) -> nodes.list_item:
+		"""
+		Create a derived item, known by the names a hand-written item may refer to it by.
+
+		:param paragraph: The item's text.
+		:param keys:      The names of the item.
+		:returns:         The item.
+		"""
+		item = nodes.list_item("", paragraph)
+		self._keys[id(item)] = keys
+
+		return item
+
+	def _IncludeItem(self, include: Include) -> nodes.list_item:
+		"""
+		Create the item of an include.
+
+		A local file links to GitLab, if ``glci_project`` and ``glci_ref`` are configured; another project's files link
+		to that project, a URL to itself, a component to its project.
+
+		:param include: The include.
+		:returns:       The item, known by the include as written.
+		"""
+		from pyTooling.GitLab.PipelineFile import IncludeKind
+
+		text = include.Location
+		literal = nodes.literal(text, text)
+		paragraph = nodes.paragraph("", f"{include.Kind.value} ")
+		server = self.config.glci_server.rstrip("/")
+		url = None
+		if include.Kind is IncludeKind.Local and (root := self.env.get_domain("glci").RepositoryRoot) is not None:
+			url = self._GitLabURL(root / text.lstrip("/"))
+		elif include.Kind is IncludeKind.Project:
+			url = f"{server}/{text}"
+		elif include.Kind is IncludeKind.Remote:
+			url = text
+		elif include.Kind is IncludeKind.Component and "/" in (path := text.partition("@")[0]):
+			url = f"{server}/{path.partition('/')[2].rpartition('/')[0]}"
+
+		paragraph += literal if url is None else nodes.reference(text, "", literal, refuri=url)
+		if len(include.Files) > 0:
+			paragraph += nodes.Text(f": {', '.join(include.Files)}")
+
+		return self._Item(paragraph, {text, text.partition("@")[0], *include.Files})
+
+	def _ImageItem(self, kind: str, image: str) -> nodes.list_item:
+		"""
+		Create the item of a container's image.
+
+		:param kind:  The kind of container, as ``image`` or ``service``.
+		:param image: The image, as written.
+		:returns:     The item, known by the kind and the image.
+		"""
+		return self._Item(nodes.paragraph("", f"{kind} ", nodes.literal(image, image)), {kind, image})
+
+	def _FileItems(self, pipelineFile: PipelineFile, visited: set[Path]) -> nodes.bullet_list:
+		"""
+		List a pipeline file's dependencies: its includes, the pipelines its trigger jobs start, and container images.
+
+		:param pipelineFile: The pipeline file.
+		:param visited:      The resolved paths of the files on the path to this one, which aren't expanded again.
+		:returns:            A bullet list, empty if the file uses nothing.
+		"""
+		resolver = self.env.get_domain("glci").Resolver
+		bulletList = nodes.bullet_list()
+		for include in {(include.Kind, include.Location): include for include in pipelineFile.Includes}.values():
+			bulletList += self._ResolvedItem(include, resolver, visited)
+
+		for job in pipelineFile.IterateJobs():
+			if (trigger := job.Trigger) is None:
+				continue
+
+			paragraph = nodes.paragraph("", "trigger ", nodes.emphasis(text=job.Name))
+			if trigger.Project is not None:
+				paragraph += (nodes.Text(" - project "), nodes.literal(trigger.Project, trigger.Project))
+
+			item = self._Item(paragraph, {f"trigger {job.Name}", job.Name})
+			if len(childIncludes := trigger.Includes) > 0:
+				item += nodes.bullet_list("", *(self._ResolvedItem(include, resolver, visited) for include in childIncludes))
+
+			bulletList += item
+
+		images: dict[tuple[str, str], None] = {}
+		if (default := pipelineFile.Default) is not None:
+			if default.Image is not None:
+				images[("image", default.Image)] = None
+			images.update(dict.fromkeys(("service", service) for service in default.Services))
+
+		for job in pipelineFile.IterateJobs():
+			if job.Image is not None:
+				images[("image", job.Image)] = None
+			images.update(dict.fromkeys(("service", service) for service in job.Services))
+
+		bulletList.extend(self._ImageItem(kind, image) for kind, image in images)
+
+		return bulletList
+
+	def _ResolvedItem(self, include: Include, resolver: Any, visited: set[Path]) -> nodes.list_item:
+		"""
+		Create the item of an include, with the dependencies of the local file it names, if that is readable.
+
+		:param include:  The include.
+		:param resolver: The domain's resolver, or ``None`` if ``glci_repository_root`` isn't configured.
+		:param visited:  The resolved paths of the files on the path, which aren't expanded again.
+		:returns:        The item.
+		"""
+		item = self._IncludeItem(include)
+		if resolver is None:
+			return item
+
+		included = self._ResolveOrWarn(lambda: resolver.Resolve(include), lambda: None)
+		if included is not None and (path := included.Path.resolve()) not in visited:
+			if len(nested := self._FileItems(included, visited | {path})) > 0:
+				item += nested
+
+		return item
+
+	def _Merge(self, derived: nodes.bullet_list, handwritten: nodes.bullet_list) -> None:
+		"""
+		Merge a hand-written list into a derived one.
+
+		A hand-written item whose text is a name of a derived item of this list adds its nested lists to that item,
+		merged recursively; any other item is appended.
+
+		:param derived:     The derived list.
+		:param handwritten: The hand-written list.
+		"""
+		for item in list(handwritten.children):
+			text = item[0].astext().strip() if len(item) > 0 and isinstance(item[0], nodes.paragraph) else None
+			match = next(
+				(child for child in derived.children if text is not None and text in self._keys.get(id(child), ())), None
+			)
+			if match is None:
+				derived += item
+				continue
+
+			for node in item.children[1:]:
+				nested = next((child for child in match.children if isinstance(child, nodes.bullet_list)), None)
+				if isinstance(node, nodes.bullet_list) and nested is not None:
+					self._Merge(nested, node)
+				else:
+					match += node
+
+
+@export
+class YAMLExcerpt(PipelineReferenceDirective):
+	"""
+	The directive ``glci:yaml``: the current pipeline file or a part of it, as a YAML code block.
+
+	.. code-block:: ReST
+
+	   .. glci:yaml::
+	      :section: inputs
+
+	Option ``:section:`` selects one of :data:`SECTIONS` - the ``inputs`` of the header's ``spec``, or a top-level key of
+	the configuration; option ``:job:`` selects one job. Without either, the whole file is shown.
+
+	The lines are numbered as in the file, and the part is shifted left by the indentation of its first line. The caption
+	names the file and the lines, and links to them on GitLab at ``glci_ref``, if ``glci_project``, ``glci_ref`` and
+	``glci_repository_root`` are configured.
+	"""
+
+	directiveName: str = "glci:yaml"  #: Name the directive is invoked by.
+
+	has_content =               False  #: A boolean; ``True`` if content is allowed.
+	required_arguments =        0      #: Number of required directive arguments.
+	optional_arguments =        0      #: Number of optional arguments after the required ones.
+	final_argument_whitespace = False  #: A boolean; ``True`` if the last argument may contain spaces.
+	option_spec: dict[str, Any] = {  # type: ignore[misc]
+		"caption": directives.unchanged_required,
+		"job":     strip,
+		"name":    strip,
+		"section": strip,
+	}  #: Mapping of option names to validator functions.
+
+	def run(self) -> list[nodes.Node]:
+		"""
+		Create the code block.
+
+		:returns: The code block in a captioned container, an error node for wrong options, or nothing without a current
+		          pipeline or when the part doesn't exist.
+		"""
+		if "section" in self.options and "job" in self.options:
+			return [self.state.document.reporter.error(
+				f"{self.directiveName}: Options ':section:' and ':job:' exclude each other.", line=self.lineno
+			)]
+		elif (section := self.options.get("section", None)) is not None and section not in SECTIONS:
+			return [self.state.document.reporter.error(
+				f"{self.directiveName}::section: '{section}' is not one of {', '.join(SECTIONS)}.", line=self.lineno
+			)]
+
+		if (pipelineFile := self._CurrentPipeline()) is None:
+			return []
+
+		pipelineName = self.env.ref_context["glci:pipeline"]
+		lines = pipelineFile.Path.read_text(encoding="utf-8").splitlines()
+		if section is not None:
+			if (line := self._SectionLine(pipelineFile, lines, section)) is None:
+				_logger.warning(
+					f"{self.directiveName}: Pipeline '{pipelineName}' has no {section}.",
+					location=self.get_location(), type=WARNING_TYPE, subtype="drift"
+				)
+				return []
+
+			first, last = self._BlockOf(lines, line)
+		elif (jobName := self.options.get("job", None)) is not None:
+			job = pipelineFile.Jobs.get(jobName, None) or pipelineFile.HiddenJobs.get(jobName, None)
+			if job is None:
+				_logger.warning(
+					f"{self.directiveName}: Pipeline '{pipelineName}' has no job '{jobName}'.",
+					location=self.get_location(), type=WARNING_TYPE, subtype="drift"
+				)
+				return []
+
+			first, last = self._BlockOf(lines, job.Line)
+		else:
+			first = 1
+			last = len(lines)
+
+		indentation = self._Indentation(lines[first - 1])
+		excerpt = [line[min(indentation, self._Indentation(line)):] for line in lines[first - 1:last]]
+
+		text = "\n".join(excerpt)
+		literal = nodes.literal_block(text, text, language="yaml", linenos=True)
+		literal["highlight_args"] = {"linenostart": first}
+		self.set_source_info(literal)
+
+		if (caption := self.options.get("caption", None)) is None:
+			fileName = pipelineFile.Path.name
+			if first == 1 and last == len(lines):
+				caption = fileName
+				url = self._GitLabURL(pipelineFile.Path)
+			else:
+				caption = f"{fileName}, lines {first}-{last}"
+				url = self._GitLabURL(pipelineFile.Path, first, last)
+
+			if url is not None:
+				caption = f"`{caption} <{url}>`__"
+
+		container = container_wrapper(self, literal, caption)
+		self.add_name(container)
+
+		return [container]
+
+	@classmethod
+	def _SectionLine(cls, pipelineFile: PipelineFile, lines: list[str], section: str) -> Nullable[int]:
+		"""
+		Return the line of a section's key.
+
+		The inputs' key is the key holding the first input. A top-level key is searched in the configuration document,
+		behind the header document's ``---``, if there is one.
+
+		:param pipelineFile: The pipeline file.
+		:param lines:        The lines of the file.
+		:param section:      One of :data:`SECTIONS`.
+		:returns:            The key's line, starting at 1, or ``None`` if the file hasn't the section.
+		"""
+		if section == "inputs":
+			if len(pipelineFile.Inputs) == 0:
+				return None
+
+			return cls._ParentOf(lines, next(iter(pipelineFile.Inputs.values())).Line)
+
+		start = 0
+		if len(pipelineFile.Inputs) > 0 or pipelineFile.Description is not None:
+			start = next((index + 1 for index, line in enumerate(lines) if line.rstrip() == "---"), 0)
+
+		for index in range(start, len(lines)):
+			if lines[index].startswith(f"{section}:"):
+				return index + 1
+
+		return None
+
+	@staticmethod
+	def _Indentation(line: str) -> int:
+		"""
+		Return the indentation of a line of a YAML file.
+
+		:param line: The line.
+		:returns:    The number of spaces the line starts with.
+		"""
+		return len(line) - len(line.lstrip(" "))
+
+	@staticmethod
+	def _IsBlank(line: str) -> bool:
+		"""
+		Return whether a line is empty or a comment.
+
+		:param line: The line.
+		:returns:    ``True``, if the line holds nothing but whitespace or a comment.
+		"""
+		stripped = line.strip()
+		return stripped == "" or stripped.startswith("#")
+
+	@classmethod
+	def _ParentOf(cls, lines: list[str], line: int) -> int:
+		"""
+		Return the line of the key a line is nested in.
+
+		:param lines: The lines of the file.
+		:param line:  The nested line, starting at 1.
+		:returns:     The nearest line above it that is indented less, starting at 1, or ``1``.
+		"""
+		indentation = cls._Indentation(lines[line - 1])
+		for index in range(line - 2, -1, -1):
+			text = lines[index]
+			if not cls._IsBlank(text) and cls._Indentation(text) < indentation:
+				return index + 1
+
+		return 1
+
+	@classmethod
+	def _BlockOf(cls, lines: list[str], line: int) -> tuple[int, int]:
+		"""
+		Return the lines of a key and its value.
+
+		The block ends before the next line - not empty and not a comment - indented as much as the key or less. A comment
+		indented as much as the key or less, and empty lines, at the end aren't part of it.
+
+		:param lines: The lines of the file.
+		:param line:  The key's line, starting at 1.
+		:returns:     The first and the last line of the block, starting at 1.
+		"""
+		indentation = cls._Indentation(lines[line - 1])
+		last = line
+		for index in range(line, len(lines)):
+			text = lines[index]
+			if text.strip() == "":
+				continue
+			elif cls._Indentation(text) > indentation:
+				last = index + 1
+			elif not cls._IsBlank(text):
+				break
+
+		return line, last
 
 
 @export
