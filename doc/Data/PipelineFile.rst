@@ -14,9 +14,9 @@ Pipeline File
 
    pipelineFile = PipelineFile.FromFile(Path(".gitlab-ci.yml"))
 
-   print(f"{pipelineFile.Path.name}: stages {', '.join(pipelineFile.Stages)}")
-   for variable in pipelineFile.Variables.values():
-     print(f"  {variable.Name:<24} {variable.Value}")
+   print(f"{pipelineFile}: {pipelineFile.JobCount} jobs in stages {', '.join(pipelineFile.Stages)}")
+   for job in pipelineFile.IterateJobs():
+     print(f"  {job.Name:<24} {job.Stage:<10} {job.Image or ''}")
 
 The file is read with ``ruamel.yaml``, a requirement of this package.
 
@@ -30,6 +30,8 @@ The Tree
 
    - :class:`~pyTooling.GitLab.PipelineFile.PipelineFile` | a configuration file
      - :class:`~pyTooling.GitLab.PipelineFile.Variable`   | a default variable, declared in the top-level ``variables``
+     - :class:`~pyTooling.GitLab.PipelineFile.Job`        | a job or a hidden job, in file order
+       - :class:`~pyTooling.GitLab.PipelineFile.Variable` | a variable of the job
 
 Every element knows its :attr:`~pyTooling.GitLab.PipelineFile.Base.Parent`, and holds a reference to the configuration
 file it belongs to in :attr:`~pyTooling.GitLab.PipelineFile.Base.PipelineFile`.
@@ -76,6 +78,38 @@ file is its text, as ``3.14`` or ``true``. A variable declared as mapping may al
        value: "staging"
        description: "The deployment target."
        options: ["production", "staging"]
+
+
+.. _DATA/PipelineFile/Jobs:
+
+Jobs
+****
+
+A top-level key is a :class:`~pyTooling.GitLab.PipelineFile.Job`, unless it is a global keyword
+(:data:`~pyTooling.GitLab.PipelineFile.RESERVED_KEYS`). A job whose name starts with a dot is a **hidden job**:
+GitLab doesn't run it, other jobs extend it. The file keeps both apart, in file order:
+
+.. code-block:: python
+
+   pipelineFile.Jobs                       # the jobs, by name
+   pipelineFile.HiddenJobs                 # the hidden jobs, by name
+   pipelineFile.ContainsJob(".template")   # False: a hidden job isn't a job
+
+A job runs in its :attr:`~pyTooling.GitLab.PipelineFile.Job.Stage` - ``test``, if it names none -, which
+:meth:`~pyTooling.GitLab.PipelineFile.PipelineFile.FromFile` checks against the pipeline's stages. The keys a job's
+documentation needs are read too:
+
+* :attr:`~pyTooling.GitLab.PipelineFile.Job.Script`, :attr:`~pyTooling.GitLab.PipelineFile.Job.BeforeScript` and
+  :attr:`~pyTooling.GitLab.PipelineFile.Job.AfterScript` - the lines, a single line as a list of one, nested lists
+  flattened;
+* :attr:`~pyTooling.GitLab.PipelineFile.Job.When` - a :class:`~pyTooling.GitLab.PipelineFile.When`;
+* :attr:`~pyTooling.GitLab.PipelineFile.Job.AllowFailure` and
+  :attr:`~pyTooling.GitLab.PipelineFile.Job.AllowedExitCodes` - ``allow_failure`` as a boolean, or as a mapping of
+  ``exit_codes``;
+* :attr:`~pyTooling.GitLab.PipelineFile.Job.Image`, :attr:`~pyTooling.GitLab.PipelineFile.Job.Services` and
+  :attr:`~pyTooling.GitLab.PipelineFile.Job.Environment` - the names, written as a string or as the ``name`` of a
+  mapping; :attr:`~pyTooling.GitLab.PipelineFile.Job.Tags`;
+* :attr:`~pyTooling.GitLab.PipelineFile.Job.Variables` - the job's variables.
 
 
 .. _DATA/PipelineFile/Lines:

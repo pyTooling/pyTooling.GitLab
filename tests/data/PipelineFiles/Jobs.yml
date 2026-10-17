@@ -1,0 +1,43 @@
+# A configuration with jobs of every kind of key this model reads, and a hidden job.
+stages:
+  - build
+  - test
+  - deploy
+
+.template:
+  image: python:3.14
+
+build:
+  stage: build
+  image:
+    name: python:3.14
+    entrypoint: [""]
+  services:
+    - postgres:17
+    - name: redis:8
+      alias: cache
+  tags: [linux, docker]
+  variables:
+    CONFIGURATION: release
+  script:
+    - echo "build"
+    - - echo "nested"
+      - echo "lists"
+
+test:
+  script: pytest
+  when: manual
+  allow_failure:
+    exit_codes: [137, 255]
+
+deploy:
+  stage: deploy
+  environment:
+    name: production
+    url: https://example.com
+  allow_failure: true
+  before_script: echo "before"
+  after_script:
+    - echo "after"
+  script:
+    - echo "deploy"
