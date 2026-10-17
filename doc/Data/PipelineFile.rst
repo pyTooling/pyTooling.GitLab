@@ -31,6 +31,7 @@ The Tree
    - :class:`~pyTooling.GitLab.PipelineFile.PipelineFile` | a configuration file
      - :class:`~pyTooling.GitLab.PipelineFile.Variable`   | a default variable, declared in the top-level ``variables``
      - :class:`~pyTooling.GitLab.PipelineFile.Job`        | a job or a hidden job, in file order
+       - :class:`~pyTooling.GitLab.PipelineFile.Need`     | an entry of the job's ``needs``
        - :class:`~pyTooling.GitLab.PipelineFile.Variable` | a variable of the job
 
 Every element knows its :attr:`~pyTooling.GitLab.PipelineFile.Base.Parent`, and holds a reference to the configuration
@@ -110,6 +111,46 @@ documentation needs are read too:
   :attr:`~pyTooling.GitLab.PipelineFile.Job.Environment` - the names, written as a string or as the ``name`` of a
   mapping; :attr:`~pyTooling.GitLab.PipelineFile.Job.Tags`;
 * :attr:`~pyTooling.GitLab.PipelineFile.Job.Variables` - the job's variables.
+
+
+.. _DATA/PipelineFile/Needs:
+
+Dependencies Between Jobs
+*************************
+
+A job runs after the jobs of the earlier stages, unless it has a ``needs`` key: then it runs as soon as the jobs it
+needs have run, and ``needs: []`` lets it start with the pipeline. :attr:`~pyTooling.GitLab.PipelineFile.Job.Needs`
+tells the three apart - ``None``, the entries, or an empty tuple. Each entry is a
+:class:`~pyTooling.GitLab.PipelineFile.Need`, whose :attr:`~pyTooling.GitLab.PipelineFile.Need.Kind` says what it
+refers to:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
+
+   * - ``needs`` entry
+     - :class:`~pyTooling.GitLab.PipelineFile.NeedKind`
+   * - ``build`` or ``job: build``
+     - ``Job`` - a job of the same pipeline
+   * - ``pipeline: $PARENT_PIPELINE_ID`` and ``job``
+     - ``PipelineJob`` - a job of another pipeline of the parent-child hierarchy
+   * - ``project``, ``job`` and ``ref``
+     - ``ProjectJob`` - a job of another project's pipeline, whose artifacts are downloaded
+   * - ``pipeline: other/project`` alone
+     - ``PipelineStatus`` - another project's pipeline, whose status the job mirrors
+
+:attr:`~pyTooling.GitLab.PipelineFile.Need.Artifacts` and :attr:`~pyTooling.GitLab.PipelineFile.Need.IsOptional`
+hold ``artifacts`` and ``optional``. :attr:`~pyTooling.GitLab.PipelineFile.Job.NeededJobs` resolves the needs of the
+same pipeline to the jobs of the file:
+
+.. code-block:: python
+
+   for job in pipelineFile.IterateJobs():
+     if job.Needs is not None:
+       print(f"{job.Name} needs {', '.join(needed.Name for needed in job.NeededJobs)}")
+
+:meth:`~pyTooling.GitLab.PipelineFile.PipelineFile.FromFile` checks that a job needs only jobs of the file - an
+optional need may name a missing job - and that the jobs don't need each other in a cycle.
 
 
 .. _DATA/PipelineFile/Lines:
