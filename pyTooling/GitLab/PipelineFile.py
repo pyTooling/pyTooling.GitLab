@@ -56,14 +56,22 @@ read once into objects:
 Every element knows its parent, the file it belongs to and the line it starts at, so a consumer can name the place a
 finding comes from, as ``.gitlab-ci.yml:42``.
 
+:class:`IncludeResolver` reads the local files a file includes, or a trigger job's child pipeline runs.
+
 The model is independent of :mod:`pyTooling.GitLab`, which models a pipeline *run* as the REST API reports it.
+:meth:`PipelineFile.ToPipeline` builds the pipeline a file defines as a :mod:`pyTooling.CI` model, whose elements link
+back to the jobs they were built from.
 """
 from __future__               import annotations
 
 from itertools                import product
 from pathlib                  import Path
-from typing                   import Any, ClassVar, Generic, Iterable, Iterator, Mapping, Optional as Nullable, Self
-from typing                   import TypeVar, Union
+from typing                   import Any, ClassVar, Generic, Hashable, Iterable, Iterator, Mapping, Optional as Nullable
+from typing                   import Self, TypeVar, Union
+
+from pyTooling.CI             import DependencyMixin, Job as CIJob, JobGroup, Matrix as CIMatrix
+from pyTooling.CI             import MatrixJob as CIMatrixJob, MatrixWorkflow as CIMatrixWorkflow
+from pyTooling.CI             import Pipeline as CIPipeline, Workflow as CIWorkflow
 
 from pyTooling.Common         import getFullyQualifiedName, StringEnum
 from pyTooling.Decorators     import export, readonly
@@ -89,6 +97,9 @@ ParentType = TypeVar("ParentType", bound="Base")
 
 ParentTypes = Nullable[Union[type, tuple[type, ...]]]
 """The type of :attr:`Base._PARENT_TYPE`: ``None``, a class, or a tuple of classes."""
+
+DefinitionType = TypeVar("DefinitionType", bound="Base")
+"""A type variable for the type of the file's element an element of :mod:`pyTooling.CI` is built from."""
 
 RESERVED_KEYS = frozenset((
 	"default", "include", "stages", "variables", "workflow", "image", "services", "cache", "before_script", "after_script"
@@ -682,17 +693,152 @@ class PipelineFile(Base[None]):
 		"""
 		return self._path.name
 
+	def ToPipeline(self, resolver: Nullable[IncludeResolver] = None, depth: Nullable[int] = None) -> DefinedPipeline:
+		"""
+		Build the service-independent model of the pipeline this file defines.
+
+		Every job - hidden jobs aside - becomes an element of :mod:`pyTooling.CI`, named by its key and linked to the job
+		by :attr:`~DefinitionMixin.Definition`:
+
+		* a job running a script becomes a :class:`DefinedJob`;
+		* a trigger job becomes a :class:`DefinedWorkflow`, holding the elements of its child pipeline, if the resolver
+		  reads the child pipeline's files and the depth allows it;
+		* a job with ``parallel`` becomes a :class:`DefinedMatrix`, holding a :class:`DefinedMatrixJob` or a
+		  :class:`DefinedMatrixWorkflow` per instance.
+
+		The ``needs`` of a job become the element's :attr:`~pyTooling.CI.DependencyMixin.Needs`; a job without ``needs``
+		needs every element of the nearest earlier stage holding elements. A need of some instances of a matrix needs the
+		whole matrix. So :meth:`~pyTooling.CI.Workflow.ToGraph` converts the result into a graph.
+
+		:param resolver:           Optional, the resolver reading the files of the child pipelines. Without it, child
+		                           pipelines are not expanded. Default: ``None``.
+		:param depth:              Optional, how many levels of child pipelines to expand; ``0`` expands none, ``None``
+		                           every level. Default: ``None``.
+		:returns:                  The pipeline.
+		:raises TypeError:         If parameter 'resolver' is not of type :class:`IncludeResolver`.
+		:raises TypeError:         If parameter 'depth' is not of type :class:`int`.
+		:raises ValueError:        If parameter 'depth' is negative.
+		:raises PipelineFileError: If a child pipeline's file is not a well-formed configuration, or runs itself.
+		"""
+		if resolver is not None and not isinstance(resolver, IncludeResolver):
+			ex = TypeError("Parameter 'resolver' is not of type 'IncludeResolver'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(resolver)}'.")
+			raise ex
+
+		if depth is not None and (not isinstance(depth, int) or isinstance(depth, bool)):
+			ex = TypeError("Parameter 'depth' is not of type 'int'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(depth)}'.")
+			raise ex
+		elif depth is not None and depth < 0:
+			ex = ValueError("Parameter 'depth' is negative.")
+			ex.add_note(f"Got value '{depth}'.")
+			raise ex
+
+		def childFiles(job: Job, level: int, callers: tuple[PipelineFile, ...]) -> list[PipelineFile]:
+			"""
+			Nested function reading the files of a trigger job's child pipeline.
+
+			:param job:                The trigger job.
+			:param level:              How many levels of child pipelines are expanded above this one.
+			:param callers:            The files expanded above this one, this one last.
+			:returns:                  The files the resolver reads, if the depth allows expanding them.
+			:raises PipelineFileError: If a child pipeline runs a file expanded above it.
+			"""
+			if resolver is None or job._trigger is None or (depth is not None and level >= depth):
+				return []
+
+			files = []
+			for include in job._trigger._includes:
+				if (child := resolver.Resolve(include)) is None:
+					continue
+				elif any(caller._path.resolve() == child._path.resolve() for caller in callers):
+					ex = PipelineFileError(f"Child pipeline '{child._path.name}' runs itself.", callers[-1]._path, include._line)
+					ex.add_note(f"Runs: {' -> '.join(caller._path.name for caller in (*callers, child))}.")
+					raise ex
+
+				files.append(child)
+
+			return files
+
+		def addElements(
+			pipelineFile: PipelineFile,
+			group:        CIWorkflow,
+			level:        int,
+			callers:      tuple[PipelineFile, ...]
+		) -> None:
+			"""
+			Nested function for recursion, adding the elements of a file's jobs to a group.
+
+			:param pipelineFile:       The file whose jobs become elements.
+			:param group:              The group the elements are added to.
+			:param level:              How many levels of child pipelines are expanded above this one.
+			:param callers:            The files expanded above this one, this one last.
+			:raises PipelineFileError: If a child pipeline runs a file expanded above it.
+			"""
+			elements: dict[str, DependencyMixin] = {}
+			for job in pipelineFile._jobs.values():
+				children = childFiles(job, level, callers)
+				if job._parallel is not None:
+					element = DefinedMatrix(job, parent=group)
+					if job._parallel._count is not None:
+						dimensions = [{"CI_NODE_INDEX": str(index)} for index in range(1, job._parallel._count + 1)]
+					else:
+						dimensions = job._parallel.Combinations
+
+					for dimension in dimensions:
+						if job._trigger is None:
+							DefinedMatrixJob(job, dimension, parent=element)
+						else:
+							instance = DefinedMatrixWorkflow(job, dimension, childFiles=children, parent=element)
+							for child in children:
+								addElements(child, instance, level + 1, (*callers, child))
+				elif job._trigger is not None:
+					element = DefinedWorkflow(job, childFiles=children, parent=group)
+					for child in children:
+						addElements(child, element, level + 1, (*callers, child))
+				else:
+					element = DefinedJob(job, parent=group)
+
+				elements[job._name] = element
+
+			stages = pipelineFile.Stages
+			byStage: dict[int, list[str]] = {}
+			for job in pipelineFile._jobs.values():
+				if job._stage in stages:
+					byStage.setdefault(stages.index(job._stage), []).append(job._name)
+
+			for job in pipelineFile._jobs.values():
+				if job._needs is not None:
+					for need in job._needs:
+						if need._kind is NeedKind.Job and need._job in elements:
+							elements[job._name].AddNeed(elements[need._job])
+				elif job._stage in stages:
+					earlier = [index for index in byStage if index < stages.index(job._stage)]
+					for name in byStage[max(earlier)] if len(earlier) > 0 else ():
+						elements[job._name].AddNeed(elements[name])
+
+		pipeline = DefinedPipeline(self)
+		addElements(self, pipeline, 0, (self, ))
+		pipeline.Validate()
+
+		return pipeline
+
 	@classmethod
-	def FromFile(cls, path: Path) -> Self:
+	def FromFile(cls, path: Path, resolver: Nullable[IncludeResolver] = None) -> Self:
 		"""
 		Read a configuration file.
 
 		A file may begin with a header document holding the ``spec`` key, separated from the configuration by ``---``.
 
+		With a resolver, the local files the file includes are read too, so a job may extend their jobs and a
+		``!reference`` tag refer to their keys. The included jobs aren't jobs of this file.
+
 		:param path:               Path to the configuration file.
+		:param resolver:           Optional, the resolver reading the local files the file includes. Default: ``None``.
 		:returns:                  The configuration file, with its variables and jobs attached.
 		:raises ValueError:        If parameter 'path' is ``None``.
 		:raises TypeError:         If parameter 'path' is not of type :class:`~pathlib.Path`.
+		:raises TypeError:         If parameter 'resolver' is not of type :class:`IncludeResolver`.
 		:raises PipelineFileError: If the file doesn't exist.
 		:raises PipelineFileError: If the file can't be read.
 		:raises PipelineFileError: If the file is not a YAML document.
@@ -712,7 +858,36 @@ class PipelineFile(Base[None]):
 			ex = TypeError("Parameter 'path' is not of type 'Path'.")
 			ex.add_note(f"Got type '{getFullyQualifiedName(path)}'.")
 			raise ex
-		elif not path.exists():
+
+		if resolver is not None and not isinstance(resolver, IncludeResolver):
+			ex = TypeError("Parameter 'resolver' is not of type 'IncludeResolver'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(resolver)}'.")
+			raise ex
+
+		header, document = cls._Load(path)
+		included: dict[str, Any] = {}
+		incomplete = "include" in document
+		if resolver is not None:
+			included, incomplete = resolver._Included(document, path, (path.resolve(), ))
+
+		pipelineFile = cls._Parse(document, path, header, included, incomplete)
+		pipelineFile._Validate()
+
+		return pipelineFile
+
+	@staticmethod
+	def _Load(path: Path) -> tuple[Nullable[CommentedMap], CommentedMap]:
+		"""
+		Read the documents of a configuration file.
+
+		:param path:               Path to the configuration file.
+		:returns:                  The header document, or ``None``, and the configuration.
+		:raises PipelineFileError: If the file doesn't exist, can't be read, or is not a YAML document.
+		:raises PipelineFileError: If the file holds more than two documents, or its first of two documents has no
+		                           ``spec`` key.
+		:raises PipelineFileError: If the configuration is not a mapping.
+		"""
+		if not path.exists():
 			raise PipelineFileError("Configuration file doesn't exist.", path) from FileNotFoundError(path)
 
 		try:
@@ -743,19 +918,26 @@ class PipelineFile(Base[None]):
 			ex.add_note(f"Got type '{getFullyQualifiedName(document)}'.")
 			raise ex
 
-		pipelineFile = cls._Parse(document, path, header)
-		pipelineFile._Validate()
-
-		return pipelineFile
+		return header, document
 
 	@classmethod
-	def _Parse(cls, document: CommentedMap, path: Path, header: Nullable[CommentedMap] = None) -> Self:
+	def _Parse(
+		cls,
+		document:   CommentedMap,
+		path:       Path,
+		header:     Nullable[CommentedMap]      = None,
+		included:   Nullable[Mapping[str, Any]] = None,
+		incomplete: Nullable[bool]              = None
+	) -> Self:
 		"""
 		Build a configuration file and the elements it contains from the documents read from it.
 
 		:param document:           The configuration, a mapping.
 		:param path:               Path to the configuration file.
 		:param header:             Optional, the header document, a mapping with key ``spec``. Default: ``None``.
+		:param included:           Optional, the top-level keys of the included files read. Default: ``None``.
+		:param incomplete:         Optional, ``True``, if the file includes files that weren't read. Default: ``None``,
+		                           for ``True`` if the file includes files.
 		:returns:                  The configuration file, with its variables, jobs, workflow, includes and default
 		                           attached.
 		:raises PipelineFileError: If key ``spec`` or ``spec:inputs`` of the header is not a mapping, or an input is
@@ -783,7 +965,7 @@ class PipelineFile(Base[None]):
 			variables = Variable._FromYAMLMapping(document["variables"], None, path, Base._KeyLine(document, "variables"))
 
 		jobs = []
-		for name, (mapping, unresolved) in cls._ResolveJobs(document, path).items():
+		for name, (mapping, unresolved) in cls._ResolveJobs(document, path, included, incomplete).items():
 			jobs.append(Job._FromYAML(name, mapping, path, Base._KeyLine(document, name), unresolved))
 
 		workflow = None
@@ -814,7 +996,13 @@ class PipelineFile(Base[None]):
 		return cls(path, stages, variables, jobs, workflow, includes, default, inputs, description)
 
 	@classmethod
-	def _ResolveJobs(cls, document: CommentedMap, path: Path) -> dict[str, tuple[CommentedMap, list[str]]]:
+	def _ResolveJobs(
+		cls,
+		document:   CommentedMap,
+		path:       Path,
+		included:   Nullable[Mapping[str, Any]] = None,
+		incomplete: Nullable[bool]              = None
+	) -> dict[str, tuple[CommentedMap, list[str]]]:
 		"""
 		Resolve the ``!reference`` tags, the ``extends`` and the ``default`` of every job, as GitLab merges them.
 
@@ -823,11 +1011,17 @@ class PipelineFile(Base[None]):
 		values - lists included - replace, and ``null`` removes a key. A job then gets every key of ``default``, and of
 		the global keywords standing for it, which it doesn't set, unless ``inherit.default`` says otherwise.
 
-		Every key keeps the line it is written at. What a job refers to, but the file doesn't have, is an error - unless
-		the file includes files, which may have it: then it is skipped and reported in the job's ``unresolved`` list.
+		A job may extend the jobs, and a reference refer to the keys, of the included files read. Every key keeps the line
+		it is written at; a key an included file contributes gets the line of the ``extends`` key or the reference
+		bringing it in. What a job refers to, but neither the file nor an included file has, is an error - unless the file
+		includes files that weren't read, which may have it: then it is skipped and reported in the job's ``unresolved``
+		list.
 
 		:param document:           The configuration.
 		:param path:               Path to the configuration file.
+		:param included:           Optional, the top-level keys of the included files read. Default: ``None``.
+		:param incomplete:         Optional, ``True``, if the file includes files that weren't read. Default: ``None``,
+		                           for ``True`` if the file includes files.
 		:returns:                  Every job's merged mapping, and what it refers to but the file doesn't have, by name, in
 		                           file order.
 		:raises PipelineFileError: If a job is not a mapping.
@@ -836,8 +1030,34 @@ class PipelineFile(Base[None]):
 		:raises PipelineFileError: If jobs extend each other in a cycle, or ``extends`` or ``!reference`` tags nest too
 		                           deep.
 		"""
-		hasIncludes = "include" in document
+		included = {} if included is None else dict(included)
+		hasIncludes = "include" in document if incomplete is None else incomplete
+		scope = included | dict(document)
+		foreign = {name for name in included if name not in document}
 		unresolved: dict[str, list[str]] = {}
+
+		def relocate(value: Any, line: int) -> Any:
+			"""
+			Nested function for recursion, copying a value of an included file with every line set to one of this file.
+
+			:param value: The value.
+			:param line:  The line, starting at 0.
+			:returns:     The copy.
+			"""
+			if isinstance(value, CommentedMap):
+				result = CommentedMap((key, relocate(item, line)) for key, item in value.items())
+				for key in result:
+					result.lc.add_kv_line_col(key, [line, 0, line, 0])
+			elif isinstance(value, CommentedSeq):
+				result = CommentedSeq(relocate(item, line) for item in value)
+				for index in range(len(result)):
+					result.lc.add_kv_line_col(index, [line, 0, line, 0])
+			else:
+				return value
+
+			result.lc.line = line
+			result.lc.col = 0
+			return result
 
 		def resolve(value: Any, owner: Nullable[str], depth: int) -> Any:
 			"""
@@ -859,9 +1079,10 @@ class PipelineFile(Base[None]):
 						f"Reference [{segments}] of {where} nests more than {MAX_REFERENCE_DEPTH} levels.", path, value.lc.line + 1
 					)
 
-				target: Any = document
-				for segment in (str(segment) for segment in value):
-					if not isinstance(target, CommentedMap) or segment not in target:
+				segmentList = [str(segment) for segment in value]
+				target: Any = scope
+				for segment in segmentList:
+					if not isinstance(target, Mapping) or segment not in target:
 						if not hasIncludes or owner is None:
 							raise PipelineFileError(
 								f"Reference [{segments}] of {where} refers to a key the file doesn't have.", path, value.lc.line + 1
@@ -871,6 +1092,9 @@ class PipelineFile(Base[None]):
 						return None
 
 					target = target[segment]
+
+				if segmentList[0] in foreign:
+					target = relocate(target, value.lc.line)
 
 				return resolve(target, owner, depth + 1)
 			elif isinstance(value, CommentedSeq):
@@ -938,6 +1162,10 @@ class PipelineFile(Base[None]):
 			return result
 
 		mappings: dict[str, CommentedMap] = {}
+		for name in foreign:
+			if name not in RESERVED_KEYS and isinstance(included[name], CommentedMap):
+				mappings[name] = resolve(included[name], name, 0)
+
 		for name, job in document.items():
 			name = str(name)
 			if name in RESERVED_KEYS:
@@ -992,13 +1220,17 @@ class PipelineFile(Base[None]):
 					unresolved.setdefault(chain[0] if len(chain) > 0 else name, []).append(f"extends {base}")
 					continue
 
-				merge(result, extended(base, (*chain, name)))
+				baseMapping = extended(base, (*chain, name))
+				if base in foreign and name not in foreign:
+					baseMapping = relocate(baseMapping, Base._KeyLine(own, "extends") - 1)
+
+				merge(result, baseMapping)
 
 			merge(result, own)
 			return result
 
 		resolved = {}
-		for name in mappings:
+		for name in (name for name in mappings if name not in foreign):
 			mapping = extended(name, ())
 			inherit = mapping.get("inherit", None)
 			inherited = inherit.get("default", True) if isinstance(inherit, CommentedMap) else True
@@ -1444,6 +1676,18 @@ class Job(Base[PipelineFile]):
 		:returns: The rules, in the order GitLab evaluates them.
 		"""
 		return self._rules
+
+	@readonly
+	def Condition(self) -> Nullable[str]:
+		"""
+		Read-only property to return the condition under which the job runs, as :mod:`pyTooling.CI` names it.
+
+		GitLab's rules are evaluated in order, the first matching one deciding, so only a single rule's ``if`` is a
+		condition of its own.
+
+		:returns: The ``if`` of the job's only rule, or ``None`` for a job with no or several rules.
+		"""
+		return self._rules[0]._condition if len(self._rules) == 1 else None
 
 	@readonly
 	def Inputs(self) -> dict[str, Input]:
@@ -3770,3 +4014,430 @@ class Input(Base[Union[PipelineFile, Job]]):
 		return [
 			cls._FromYAML(str(name), value, jobName, path, Base._KeyLine(mapping, name)) for name, value in mapping.items()
 		]
+
+
+@export
+class IncludeResolver(metaclass=ExtendedType, slots=True):
+	"""
+	Reads the local files a configuration includes, or a trigger job's child pipeline runs, from a repository's directory.
+
+	A local include's path, as ``/ci/build.yml`` or ``ci/build.yml``, is relative to the repository's root. Includes of
+	another kind - another project's files, a URL, a template, a component, an artifact - aren't read.
+
+	Every file is read once; asking for it again returns the same :class:`PipelineFile`. A file read is read with this
+	resolver, so its own local includes are read too.
+	"""
+
+	_root:      Path                      #: The repository's root directory.
+	_files:     dict[Path, PipelineFile]  #: Files already read, by resolved path.
+	_documents: dict[Path, CommentedMap]  #: Configurations of included files already read, by resolved path.
+
+	def __init__(self, root: Path) -> None:
+		"""
+		Initializes a resolver.
+
+		:param root:        The repository's root directory.
+		:raises ValueError: If parameter 'root' is ``None``.
+		:raises TypeError:  If parameter 'root' is not of type :class:`~pathlib.Path`.
+		"""
+		if root is None:
+			raise ValueError("Parameter 'root' is None.")
+		elif not isinstance(root, Path):
+			ex = TypeError("Parameter 'root' is not of type 'Path'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(root)}'.")
+			raise ex
+
+		self._root =      root
+		self._files =     {}
+		self._documents = {}
+
+	@readonly
+	def Root(self) -> Path:
+		"""
+		Read-only property to access the repository's root directory (:attr:`_root`).
+
+		:returns: The directory.
+		"""
+		return self._root
+
+	def Resolve(self, include: Include) -> Nullable[PipelineFile]:
+		"""
+		Read the file a local include names.
+
+		:param include:            The include.
+		:returns:                  The file, or ``None`` for an include of another kind, or of a file that doesn't exist.
+		:raises ValueError:        If parameter 'include' is ``None``.
+		:raises TypeError:         If parameter 'include' is not of type :class:`Include`.
+		:raises PipelineFileError: If the file is not a well-formed configuration.
+		"""
+		if include is None:
+			raise ValueError("Parameter 'include' is None.")
+		elif not isinstance(include, Include):
+			ex = TypeError("Parameter 'include' is not of type 'Include'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(include)}'.")
+			raise ex
+
+		if include._kind is not IncludeKind.Local:
+			return None
+
+		path = (self._root / include._location.lstrip("/")).resolve()
+		if (known := self._files.get(path, None)) is not None:
+			return known
+		elif not path.exists():
+			return None
+
+		self._files[path] = PipelineFile.FromFile(path, self)
+		return self._files[path]
+
+	def _Included(
+		self,
+		document: CommentedMap,
+		path:     Path,
+		visited:  tuple[Path, ...]
+	) -> tuple[dict[str, Any], bool]:
+		"""
+		Read the local files a configuration includes, and those they include in turn.
+
+		A file included again, by itself or another, is read once.
+
+		:param document:           The configuration.
+		:param path:               Path to the configuration file.
+		:param visited:            Resolved paths of the files read on the way to this one, this one last.
+		:returns:                  The top-level keys of the included files, a later file's key replacing an earlier one's;
+		                           and ``True``, if an include couldn't be read.
+		:raises PipelineFileError: If an include is malformed, or an included file is not a well-formed configuration.
+		"""
+		keys: dict[str, Any] = {}
+		incomplete = False
+		if "include" not in document:
+			return keys, incomplete
+
+		for include in Include._FromYAMLEntries(document["include"], path, Base._KeyLine(document, "include")):
+			if include._kind is not IncludeKind.Local:
+				incomplete = True
+				continue
+
+			includedPath = (self._root / include._location.lstrip("/")).resolve()
+			if includedPath in visited:
+				continue
+			elif not includedPath.exists():
+				incomplete = True
+				continue
+			elif includedPath not in self._documents:
+				self._documents[includedPath] = PipelineFile._Load(includedPath)[1]
+
+			nested, nestedIncomplete = self._Included(self._documents[includedPath], includedPath, (*visited, includedPath))
+			incomplete = incomplete or nestedIncomplete
+			keys.update(nested)
+			keys.update((str(key), value) for key, value in self._documents[includedPath].items())
+
+		return keys, incomplete
+
+
+@export
+class DefinitionMixin(Generic[DefinitionType], metaclass=ExtendedType, mixin=True, expects=("_DEFINITION_TYPE",)):
+	"""
+	Mixin-class for an element of :mod:`pyTooling.CI` built from a configuration file, linking it to its definition.
+
+	:meth:`PipelineFile.ToPipeline` builds the elements, so a consumer of the generic model still reaches the facts only
+	the file has: the line an element is written at, its stage, its trigger.
+	"""
+
+	_definition: DefinitionType  #: The element of the configuration file this element was built from.
+
+	@classmethod
+	def _CheckDefinition(cls, definition: DefinitionType) -> None:
+		"""
+		Check a definition before the element is built from it.
+
+		The host class names the element by its definition, so it checks the definition before calling
+		``super().__init__()``.
+
+		:param definition:  The element of the configuration file the element is built from.
+		:raises ValueError: If parameter 'definition' is ``None``.
+		:raises TypeError:  If parameter 'definition' is not of the type the host class declares in
+		                    :attr:`_DEFINITION_TYPE`.
+		"""
+		if definition is None:
+			raise ValueError("Parameter 'definition' is None.")
+		elif not isinstance(definition, cls._DEFINITION_TYPE):
+			ex = TypeError(f"Parameter 'definition' is not of type '{cls._DEFINITION_TYPE.__name__}'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(definition)}'.")
+			raise ex
+
+	def __init__(self, definition: DefinitionType) -> None:
+		"""
+		Initializes the link of an element to its definition, which :meth:`_CheckDefinition` checked.
+
+		:param definition: The element of the configuration file this element is built from.
+		"""
+		self._definition = definition
+
+	@readonly
+	def Definition(self) -> DefinitionType:
+		"""
+		Read-only property to access the file's element this element was built from (:attr:`_definition`).
+
+		:returns: The :class:`PipelineFile` of a pipeline, or the :class:`Job` of any other element.
+		"""
+		return self._definition
+
+
+@export
+class ChildPipelineMixin(metaclass=ExtendedType, mixin=True):
+	"""Mixin-class for a trigger job built from a configuration file, holding the files its child pipeline runs."""
+
+	_childFiles: tuple[PipelineFile, ...]  #: The files the child pipeline's elements were built from.
+
+	def __init__(self, childFiles: Nullable[Iterable[PipelineFile]] = None) -> None:
+		"""
+		Initializes the child pipeline's files.
+
+		:param childFiles: Optional, the files the child pipeline's elements are built from. Default: ``None``.
+		:raises TypeError: If an element of parameter 'childFiles' is not of type :class:`PipelineFile`.
+		"""
+		self._childFiles = () if childFiles is None else tuple(childFiles)
+		for childFile in self._childFiles:
+			if not isinstance(childFile, PipelineFile):
+				ex = TypeError("An element of parameter 'childFiles' is not of type 'PipelineFile'.")
+				ex.add_note(f"Got type '{getFullyQualifiedName(childFile)}'.")
+				raise ex
+
+	@readonly
+	def ChildFiles(self) -> tuple[PipelineFile, ...]:
+		"""
+		Read-only property to access the files the child pipeline was expanded from (:attr:`_childFiles`).
+
+		:returns: The files, empty if the child pipeline wasn't expanded - its files aren't at hand, the depth was used
+		          up, or the job starts another project's pipeline.
+		"""
+		return self._childFiles
+
+
+@export
+class DefinedPipeline(CIPipeline, DefinitionMixin[PipelineFile]):
+	"""The pipeline a configuration file defines, as :meth:`PipelineFile.ToPipeline` builds it."""
+
+	_DEFINITION_TYPE: ClassVar[type] = PipelineFile  #: A pipeline is built from a configuration file.
+
+	def __init__(self, definition: PipelineFile, *, keyValuePairs: Nullable[Mapping[Hashable, Any]] = None) -> None:
+		"""
+		Initializes a pipeline built from a configuration file, named by ``workflow:name``, or else by the file's name.
+
+		:param definition:    The configuration file.
+		:param keyValuePairs: Optional, mapping (dictionary) of key-value-pairs. Default: ``None``.
+		"""
+		self._CheckDefinition(definition)
+
+		workflow = definition._workflow
+		name = definition._path.name if workflow is None or workflow._name is None else workflow._name
+		super().__init__(name, keyValuePairs=keyValuePairs)
+		DefinitionMixin.__init__(self, definition)
+
+
+@export
+class DefinedWorkflow(CIWorkflow, ChildPipelineMixin, DefinitionMixin[Job]):
+	"""A trigger job, as :meth:`PipelineFile.ToPipeline` builds it: the pipeline it starts, as a workflow."""
+
+	_DEFINITION_TYPE: ClassVar[type] = Job  #: A workflow is built from a trigger job.
+
+	def __init__(
+		self,
+		definition:    Job,
+		*,
+		childFiles:    Nullable[Iterable[PipelineFile]] = None,
+		keyValuePairs: Nullable[Mapping[Hashable, Any]] = None,
+		parent:        Nullable[CIWorkflow]             = None
+	) -> None:
+		"""
+		Initializes a workflow built from a trigger job, named by the job's key.
+
+		The other project, or the child pipeline's files, are the workflow's :attr:`~pyTooling.CI.Workflow.Reference`,
+		the job's :attr:`~Job.Condition` the workflow's :attr:`~pyTooling.CI.ConditionMixin.Condition`.
+
+		:param definition:    The trigger job.
+		:param childFiles:    Optional, the files the child pipeline's elements are built from. Default: ``None``.
+		:param keyValuePairs: Optional, mapping (dictionary) of key-value-pairs. Default: ``None``.
+		:param parent:        Optional, reference to the workflow containing the trigger job. Default: ``None``.
+		:raises ValueError:   If parameter 'definition' starts no pipeline.
+		"""
+		self._CheckDefinition(definition)
+
+		if definition._trigger is None:
+			ex = ValueError("Parameter 'definition' starts no pipeline.")
+			ex.add_note(f"Got job '{definition._name}'.")
+			raise ex
+
+		super().__init__(
+			definition._name, reference=DefinedWorkflow._Reference(definition), condition=definition.Condition,
+			keyValuePairs=keyValuePairs, parent=parent
+		)
+		ChildPipelineMixin.__init__(self, childFiles)
+		DefinitionMixin.__init__(self, definition)
+
+	@staticmethod
+	def _Reference(definition: Job) -> str:
+		"""
+		Return what a trigger job starts, for :attr:`~pyTooling.CI.Workflow.Reference`.
+
+		:param definition: The trigger job.
+		:returns:          The other project's path, or the child pipeline's files, as ``local: /ci/child.yml``.
+		"""
+		trigger = definition._trigger
+		if trigger._project is not None:
+			return trigger._project
+
+		return ", ".join(str(include) for include in trigger._includes)
+
+
+@export
+class DefinedMatrix(CIMatrix, DefinitionMixin[Job]):
+	"""A job with ``parallel``, as :meth:`PipelineFile.ToPipeline` builds it: a matrix of its instances."""
+
+	_DEFINITION_TYPE: ClassVar[type] = Job  #: A matrix is built from a job with ``parallel``.
+
+	def __init__(
+		self,
+		definition:    Job,
+		*,
+		keyValuePairs: Nullable[Mapping[Hashable, Any]] = None,
+		parent:        Nullable[CIWorkflow]             = None
+	) -> None:
+		"""
+		Initializes a matrix built from a job with ``parallel``, named by the job's key.
+
+		:param definition:    The job.
+		:param keyValuePairs: Optional, mapping (dictionary) of key-value-pairs. Default: ``None``.
+		:param parent:        Optional, reference to the workflow containing the matrix. Default: ``None``.
+		:raises ValueError:   If parameter 'definition' has no ``parallel``.
+		"""
+		self._CheckDefinition(definition)
+
+		if definition._parallel is None:
+			ex = ValueError("Parameter 'definition' has no 'parallel'.")
+			ex.add_note(f"Got job '{definition._name}'.")
+			raise ex
+
+		super().__init__(definition._name, condition=definition.Condition, keyValuePairs=keyValuePairs, parent=parent)
+		DefinitionMixin.__init__(self, definition)
+
+
+@export
+class DefinedMatrixWorkflow(CIMatrixWorkflow, ChildPipelineMixin, DefinitionMixin[Job]):
+	"""One instance of a trigger job with ``parallel``, as :meth:`PipelineFile.ToPipeline` builds it."""
+
+	_DEFINITION_TYPE: ClassVar[type] = Job  #: A matrix instance is built from the job with ``parallel``.
+
+	def __init__(
+		self,
+		definition:    Job,
+		dimensions:    Mapping[str, Any],
+		*,
+		childFiles:    Nullable[Iterable[PipelineFile]] = None,
+		keyValuePairs: Nullable[Mapping[Hashable, Any]] = None,
+		parent:        Nullable[CIMatrix]               = None
+	) -> None:
+		"""
+		Initializes one instance of a trigger job with ``parallel``, named by the job's key.
+
+		:param definition:    The trigger job.
+		:param dimensions:    The variables this instance runs with, as ``{"PROVIDER": "aws"}``, or
+		                      ``{"CI_NODE_INDEX": "2"}`` for ``parallel: N``.
+		:param childFiles:    Optional, the files the child pipeline's elements are built from. Default: ``None``.
+		:param keyValuePairs: Optional, mapping (dictionary) of key-value-pairs. Default: ``None``.
+		:param parent:        Optional, reference to the matrix containing the instance. Default: ``None``.
+		:raises ValueError:   If parameter 'definition' starts no pipeline.
+		:raises ValueError:   If parameter 'dimensions' is ``None``.
+		"""
+		self._CheckDefinition(definition)
+
+		if definition._trigger is None:
+			ex = ValueError("Parameter 'definition' starts no pipeline.")
+			ex.add_note(f"Got job '{definition._name}'.")
+			raise ex
+		elif dimensions is None:
+			raise ValueError("Parameter 'dimensions' is None.")
+
+		super().__init__(
+			definition._name, dimensions, reference=DefinedWorkflow._Reference(definition), condition=definition.Condition,
+			keyValuePairs=keyValuePairs, parent=parent
+		)
+		ChildPipelineMixin.__init__(self, childFiles)
+		DefinitionMixin.__init__(self, definition)
+
+	def __str__(self) -> str:
+		"""
+		Return the name GitLab gives the instance.
+
+		:returns: The name, as ``test 1/3`` for ``parallel: N``, or ``test: [3.14, linux]`` for a matrix.
+		"""
+		return Parallel._InstanceName(self._name, self._definition._parallel._count, self._dimensions)
+
+
+@export
+class DefinedJob(CIJob, DefinitionMixin[Job]):
+	"""A job running a script, as :meth:`PipelineFile.ToPipeline` builds it."""
+
+	_DEFINITION_TYPE: ClassVar[type] = Job  #: A job is built from its job in the configuration file.
+
+	def __init__(
+		self,
+		definition:    Job,
+		*,
+		keyValuePairs: Nullable[Mapping[Hashable, Any]] = None,
+		parent:        Nullable[JobGroup]               = None
+	) -> None:
+		"""
+		Initializes a job built from its job in the configuration file, named by the job's key.
+
+		:param definition:    The job.
+		:param keyValuePairs: Optional, mapping (dictionary) of key-value-pairs. Default: ``None``.
+		:param parent:        Optional, reference to the group containing the job. Default: ``None``.
+		"""
+		self._CheckDefinition(definition)
+
+		super().__init__(definition._name, condition=definition.Condition, keyValuePairs=keyValuePairs, parent=parent)
+		DefinitionMixin.__init__(self, definition)
+
+
+@export
+class DefinedMatrixJob(CIMatrixJob, DefinitionMixin[Job]):
+	"""One instance of a job with ``parallel``, as :meth:`PipelineFile.ToPipeline` builds it."""
+
+	_DEFINITION_TYPE: ClassVar[type] = Job  #: A matrix instance is built from the job with ``parallel``.
+
+	def __init__(
+		self,
+		definition:    Job,
+		dimensions:    Mapping[str, Any],
+		*,
+		keyValuePairs: Nullable[Mapping[Hashable, Any]] = None,
+		parent:        Nullable[CIMatrix]               = None
+	) -> None:
+		"""
+		Initializes one instance of a job with ``parallel``, named by the job's key.
+
+		:param definition:    The job.
+		:param dimensions:    The variables this instance runs with, as ``{"PROVIDER": "aws"}``, or
+		                      ``{"CI_NODE_INDEX": "2"}`` for ``parallel: N``.
+		:param keyValuePairs: Optional, mapping (dictionary) of key-value-pairs. Default: ``None``.
+		:param parent:        Optional, reference to the matrix containing the instance. Default: ``None``.
+		:raises ValueError:   If parameter 'dimensions' is ``None``.
+		"""
+		self._CheckDefinition(definition)
+
+		if dimensions is None:
+			raise ValueError("Parameter 'dimensions' is None.")
+
+		super().__init__(
+			definition._name, dimensions, condition=definition.Condition, keyValuePairs=keyValuePairs, parent=parent
+		)
+		DefinitionMixin.__init__(self, definition)
+
+	def __str__(self) -> str:
+		"""
+		Return the name GitLab gives the instance.
+
+		:returns: The name, as ``test 1/3`` for ``parallel: N``, or ``test: [3.14, linux]`` for a matrix.
+		"""
+		return Parallel._InstanceName(self._name, self._definition._parallel._count, self._dimensions)

@@ -31,7 +31,7 @@
 Unit tests for :mod:`pyTooling.GitLab.PipelineFile`.
 
 The configuration file, its stages, variables, jobs, needs, rules, workflow, includes and default, how jobs extend each
-other, parallel jobs, triggers and inputs.
+other, parallel jobs, triggers, inputs, and the pipeline a file defines.
 """
 from pathlib                       import Path
 from tempfile                      import TemporaryDirectory
@@ -40,6 +40,8 @@ from textwrap                      import dedent
 from pyTooling.GitLab.PipelineFile import DEFAULT_STAGES, Job, Need, NeedKind, PipelineFile, PipelineFileError
 from pyTooling.GitLab.PipelineFile import Default, Include, IncludeKind, Parallel, Rule, Trigger, TriggerStrategy
 from pyTooling.GitLab.PipelineFile import Input, InputType, Variable, When, Workflow
+from pyTooling.GitLab.PipelineFile import DefinedJob, DefinedMatrix, DefinedMatrixJob, DefinedPipeline
+from pyTooling.GitLab.PipelineFile import DefinedWorkflow, IncludeResolver
 from pyTooling.Testing             import Testcase, testsuite, testcase
 
 
@@ -2211,3 +2213,311 @@ class InputErrors(Fixture):
 			PipelineFile.FromFile(self._Write("j:\n  inputs:\n    level:\n      options: [a]\n"))
 		self.assertEqual("Input 'level' of job 'j' has no default.", str(context.exception))
 		self.assertEqual(3, context.exception.Line)
+
+
+REPOSITORY = DATA / "Repository"
+"""Directory of a repository, whose configuration starts a child pipeline of its own files."""
+
+
+@testsuite("Pipeline built from a file")
+class ToPipeline(Fixture):
+	"""Building the pyTooling.CI pipeline a configuration file defines."""
+
+	@testcase("Elements")
+	def Elements(self) -> None:
+		"""
+		A job becomes a job, a job with 'parallel' a matrix of instances, a trigger job a workflow; hidden jobs none.
+
+		Checks the elements built from the repository's configuration.
+		"""
+		pipelineFile = PipelineFile.FromFile(REPOSITORY / ".gitlab-ci.yml")
+		pipeline = pipelineFile.ToPipeline()
+
+		self.assertIsInstance(pipeline, DefinedPipeline)
+		self.assertEqual(".gitlab-ci.yml", pipeline.Name)
+		self.assertIs(pipelineFile, pipeline.Definition)
+		self.assertEqual(["build", "lint", "docs"], [job.Name for job in pipeline.Jobs])
+		for job in pipeline.Jobs:
+			self.assertIsInstance(job, DefinedJob)
+			self.assertIs(pipelineFile.Jobs[job.Name], job.Definition)
+
+		matrix = pipeline.Matrices["test"]
+		self.assertIsInstance(matrix, DefinedMatrix)
+		self.assertEqual([{"PYTHON": "3.13"}, {"PYTHON": "3.14"}], [instance.Dimensions for instance in matrix.Instances])
+		for instance in matrix.Instances:
+			self.assertIsInstance(instance, DefinedMatrixJob)
+		self.assertEqual(["test: [3.13]", "test: [3.14]"], [str(instance) for instance in matrix.Instances])
+		self.assertIs(matrix.Instances[1], matrix.GetElement("test: [3.14]"))
+
+		self.assertEqual(["deploy", "downstream"], list(pipeline.Workflows))
+		self.assertEqual("local: /ci/child.yml", pipeline.Workflows["deploy"].Reference)
+		self.assertEqual((), pipeline.Workflows["deploy"].ChildFiles)
+		self.assertEqual("group/other", pipeline.Workflows["downstream"].Reference)
+		self.assertIsInstance(pipeline.Workflows["deploy"], DefinedWorkflow)
+
+	@testcase("Name of the pipeline")
+	def Name(self) -> None:
+		"""
+		A pipeline is named by 'workflow:name', or else by the file's name.
+
+		Builds the pipelines of a file with a workflow's name and of the repository's configuration.
+		"""
+		named = PipelineFile.FromFile(self._Write("workflow:\n  name: Nightly\nbuild:\n  script: make\n"))
+		self.assertEqual("Nightly", named.ToPipeline().Name)
+
+		self.assertEqual(".gitlab-ci.yml", PipelineFile.FromFile(REPOSITORY / ".gitlab-ci.yml").ToPipeline().Name)
+
+	@testcase("Condition")
+	def Condition(self) -> None:
+		"""
+		A job's only rule is its condition; a job with no rules has none.
+
+		Checks jobs 'docs' and 'build'.
+		"""
+		pipeline = PipelineFile.FromFile(REPOSITORY / ".gitlab-ci.yml").ToPipeline()
+
+		self.assertEqual('$CI_COMMIT_BRANCH == "main"', pipeline.GetElement("docs").Condition)
+		self.assertIsNone(pipeline.GetElement("build").Condition)
+
+	@testcase("Needs")
+	def Needs(self) -> None:
+		"""
+		A job without 'needs' needs the elements of the nearest earlier stage holding some; 'needs' replaces that.
+
+		Checks the needs of every element.
+		"""
+		pipeline = PipelineFile.FromFile(REPOSITORY / ".gitlab-ci.yml").ToPipeline()
+
+		def needs(name: str) -> list[str]:
+			"""
+			Nested function returning the names of the elements an element needs.
+
+			:param name: Name of the element.
+			:returns:    The needed elements' names.
+			"""
+			return [element.Name for element in pipeline.GetElement(name).Needs]
+
+		self.assertEqual([], needs("build"))
+		self.assertEqual([], needs("lint"))
+		self.assertEqual(["build", "lint"], needs("test"))
+		self.assertEqual(["build"], needs("docs"))
+		self.assertEqual(["test", "docs"], needs("deploy"))
+		self.assertEqual([], needs("downstream"))
+
+	@testcase("Child pipeline expanded")
+	def ChildPipeline(self) -> None:
+		"""
+		With a resolver, a trigger job's workflow holds the child pipeline's elements, unless the depth is used up.
+
+		Builds the pipeline with a resolver, and with depth 0.
+		"""
+		resolver = IncludeResolver(REPOSITORY)
+		pipeline = PipelineFile.FromFile(REPOSITORY / ".gitlab-ci.yml").ToPipeline(resolver)
+		deploy = pipeline.Workflows["deploy"]
+
+		self.assertEqual(1, len(deploy.ChildFiles))
+		self.assertEqual("child.yml", deploy.ChildFiles[0].Path.name)
+		self.assertEqual(["first"], [job.Name for job in deploy.Jobs])
+		second = deploy.Matrices["second"]
+		self.assertEqual([{"CI_NODE_INDEX": "1"}, {"CI_NODE_INDEX": "2"}], [i.Dimensions for i in second.Instances])
+		self.assertEqual(["second 1/2", "second 2/2"], [str(instance) for instance in second.Instances])
+		self.assertEqual(["first"], [element.Name for element in second.Needs])
+
+		shallow = PipelineFile.FromFile(REPOSITORY / ".gitlab-ci.yml").ToPipeline(resolver, 0)
+		self.assertEqual([], shallow.Workflows["deploy"].Jobs)
+
+	@testcase("Graph")
+	def Graph(self) -> None:
+		"""
+		The pipeline converts into a graph.
+
+		Checks the graph has a vertex per job of the configuration, hidden jobs aside.
+		"""
+		graph = PipelineFile.FromFile(REPOSITORY / ".gitlab-ci.yml").ToPipeline().ToGraph()
+
+		vertices = sorted(str(vertex.ID) for vertex in graph.IterateVertices())
+		self.assertEqual(["build", "deploy", "docs", "downstream", "lint", "test"], vertices)
+
+	@testcase("Child pipeline running itself")
+	def RunsItself(self) -> None:
+		"""
+		A child pipeline running a file expanded above it is an error.
+
+		Checks the message and the note.
+		"""
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(REPOSITORY / "ci" / "self.yml").ToPipeline(IncludeResolver(REPOSITORY))
+		self.assertEqual("Child pipeline 'self.yml' runs itself.", str(context.exception))
+		self.assertIn("Runs: self.yml -> self.yml.", context.exception.__notes__)
+
+	@testcase("Parameter checks")
+	def Parameters(self) -> None:
+		"""
+		The resolver is an IncludeResolver, the depth a non-negative integer.
+
+		Checks each exception.
+		"""
+		pipelineFile = PipelineFile.FromFile(REPOSITORY / ".gitlab-ci.yml")
+
+		with self.assertRaises(TypeError) as context:
+			pipelineFile.ToPipeline(REPOSITORY)
+		self.assertEqual("Parameter 'resolver' is not of type 'IncludeResolver'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			pipelineFile.ToPipeline(depth="1")
+		self.assertEqual("Parameter 'depth' is not of type 'int'.", str(context.exception))
+
+		with self.assertRaises(ValueError) as context:
+			pipelineFile.ToPipeline(depth=-1)
+		self.assertEqual("Parameter 'depth' is negative.", str(context.exception))
+
+
+@testsuite("Include resolver")
+class Resolver(Fixture):
+	"""Reading local includes from a repository's directory."""
+
+	@testcase("Local files")
+	def LocalFiles(self) -> None:
+		"""
+		A local include is read once, with or without a leading slash; a missing file or another kind isn't read.
+
+		Resolves includes of every outcome.
+		"""
+		resolver = IncludeResolver(REPOSITORY)
+
+		self.assertEqual(REPOSITORY, resolver.Root)
+		child = resolver.Resolve(Include(IncludeKind.Local, "/ci/child.yml", 1))
+		self.assertEqual("child.yml", child.Path.name)
+		self.assertIs(child, resolver.Resolve(Include(IncludeKind.Local, "ci/child.yml", 2)))
+		self.assertIsNone(resolver.Resolve(Include(IncludeKind.Local, "/ci/missing.yml", 3)))
+		self.assertIsNone(resolver.Resolve(Include(IncludeKind.Template, "Auto-DevOps.gitlab-ci.yml", 4)))
+
+	@testcase("Parameter checks")
+	def Parameters(self) -> None:
+		"""
+		A resolver needs a root of type Path; Resolve an Include.
+
+		Checks each exception.
+		"""
+		with self.assertRaises(ValueError) as context:
+			IncludeResolver(None)
+		self.assertEqual("Parameter 'root' is None.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			IncludeResolver(".")
+		self.assertEqual("Parameter 'root' is not of type 'Path'.", str(context.exception))
+
+		with self.assertRaises(ValueError) as context:
+			IncludeResolver(REPOSITORY).Resolve(None)
+		self.assertEqual("Parameter 'include' is None.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			IncludeResolver(REPOSITORY).Resolve("/ci/child.yml")
+		self.assertEqual("Parameter 'include' is not of type 'Include'.", str(context.exception))
+
+
+@testsuite("Defined elements")
+class DefinedElements(Testcase):
+	"""The elements built from a file check their definition."""
+
+	@testcase("Definitions")
+	def Definitions(self) -> None:
+		"""
+		An element is built from a job of the kind it stands for.
+
+		Checks each exception.
+		"""
+		with self.assertRaises(ValueError) as context:
+			DefinedJob(None)
+		self.assertEqual("Parameter 'definition' is None.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			DefinedJob("build")
+		self.assertEqual("Parameter 'definition' is not of type 'Job'.", str(context.exception))
+
+		with self.assertRaises(ValueError) as context:
+			DefinedWorkflow(Job("build", 1))
+		self.assertEqual("Parameter 'definition' starts no pipeline.", str(context.exception))
+
+		with self.assertRaises(ValueError) as context:
+			DefinedMatrix(Job("build", 1))
+		self.assertEqual("Parameter 'definition' has no 'parallel'.", str(context.exception))
+
+		with self.assertRaises(ValueError) as context:
+			DefinedMatrixJob(Job("build", 1), None)
+		self.assertEqual("Parameter 'dimensions' is None.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			DefinedWorkflow(Job("deploy", 1, trigger=Trigger(2, "group/other")), childFiles=["child.yml"])
+		self.assertEqual("An element of parameter 'childFiles' is not of type 'PipelineFile'.", str(context.exception))
+
+
+@testsuite("Included files")
+class IncludedFiles(Fixture):
+	"""Extending jobs of, and referring to keys of, the local files a file includes."""
+
+	@testcase("Resolved with a resolver")
+	def Resolved(self) -> None:
+		"""
+		With a resolver, a job extends and refers to jobs of the included local files, also of nested includes.
+
+		Checks jobs 'job' and 'deep'.
+		"""
+		pipelineFile = PipelineFile.FromFile(REPOSITORY / "ci" / "uses-templates.yml", IncludeResolver(REPOSITORY))
+		job = pipelineFile.Jobs["job"]
+
+		self.assertEqual((), job.Unresolved)
+		self.assertEqual("test", job.Stage)
+		self.assertEqual("templates", job.Variables["FROM"].Value)
+		self.assertEqual(("echo setup", "echo job"), job.Script)
+		self.assertEqual(("deep", ), pipelineFile.Jobs["deep"].Tags)
+		self.assertEqual(["job", "deep", "other"], list(pipelineFile.Jobs))
+
+	@testcase("Lines of included keys")
+	def Lines(self) -> None:
+		"""
+		A key an included file contributes gets the line of the 'extends' key bringing it in.
+
+		Checks the line of variable 'FROM' of job 'job'.
+		"""
+		pipelineFile = PipelineFile.FromFile(REPOSITORY / "ci" / "uses-templates.yml", IncludeResolver(REPOSITORY))
+
+		self.assertEqual(7, pipelineFile.Jobs["job"].Variables["FROM"].Line)
+
+	@testcase("What can't be read")
+	def Unread(self) -> None:
+		"""
+		A job extending a job of an include that can't be read - a template - lists it; without a resolver, every one.
+
+		Checks job 'other', and job 'job' without a resolver.
+		"""
+		resolved = PipelineFile.FromFile(REPOSITORY / "ci" / "uses-templates.yml", IncludeResolver(REPOSITORY))
+		self.assertEqual(("extends .remote", ), resolved.Jobs["other"].Unresolved)
+
+		unresolved = PipelineFile.FromFile(REPOSITORY / "ci" / "uses-templates.yml")
+		self.assertEqual(("!reference [.setup, script]", "extends .base"), unresolved.Jobs["job"].Unresolved)
+
+	@testcase("Every include read")
+	def EveryIncludeRead(self) -> None:
+		"""
+		If every include was read, a job extending a job no file has is an error; without a resolver, it is listed.
+
+		Checks the error, and the job read without a resolver.
+		"""
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(REPOSITORY / "ci" / "complete.yml", IncludeResolver(REPOSITORY))
+		self.assertEqual("Job 'job' extends job '.missing', which the file doesn't have.", str(context.exception))
+
+		job = PipelineFile.FromFile(REPOSITORY / "ci" / "complete.yml").Jobs["job"]
+		self.assertEqual(("extends .missing", ), job.Unresolved)
+
+	@testcase("Parameter check")
+	def Parameter(self) -> None:
+		"""
+		The resolver of FromFile is an IncludeResolver.
+
+		Checks the TypeError.
+		"""
+		with self.assertRaises(TypeError) as context:
+			PipelineFile.FromFile(REPOSITORY / ".gitlab-ci.yml", REPOSITORY)
+		self.assertEqual("Parameter 'resolver' is not of type 'IncludeResolver'.", str(context.exception))

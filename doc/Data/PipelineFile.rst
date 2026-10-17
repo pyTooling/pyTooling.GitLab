@@ -223,8 +223,9 @@ Each entry of ``include`` is an :class:`~pyTooling.GitLab.PipelineFile.Include`,
      - ``Component``, the component's reference
 
 An include's :attr:`~pyTooling.GitLab.PipelineFile.Include.Inputs` keep the types they are written with, and its
-:attr:`~pyTooling.GitLab.PipelineFile.Include.Rules` decide whether the files are included. The included files
-themselves aren't read.
+:attr:`~pyTooling.GitLab.PipelineFile.Include.Rules` decide whether the files are included. The included files are
+read only to resolve ``extends`` and ``!reference`` tags, with an
+:class:`~pyTooling.GitLab.PipelineFile.IncludeResolver` - see :ref:`DATA/PipelineFile/Extends`.
 
 :attr:`PipelineFile.Default <pyTooling.GitLab.PipelineFile.PipelineFile.Default>` holds the ``default`` key as a
 :class:`~pyTooling.GitLab.PipelineFile.Default` - image, services, tags and the scripts around a job's script. The
@@ -285,10 +286,19 @@ A job's keys are merged as GitLab merges them, before the job is built:
 
 Every key keeps the line it is written at, also when another job contributes it.
 
-A file may extend, or refer to, jobs of the files it includes, which aren't read. Then a missing job or key isn't an
-error: the job is built from what the file has, and :attr:`~pyTooling.GitLab.PipelineFile.Job.Unresolved` names what
-it lacks, as ``extends .template`` or ``!reference [.setup, script]``. A file including no files must have everything
-it refers to.
+A file may extend, or refer to, jobs of the files it includes. Read with an
+:class:`~pyTooling.GitLab.PipelineFile.IncludeResolver`, the local files it includes - and those they include - are
+read too, and their jobs and keys resolve; a key an included file contributes gets the line of the ``extends`` key or
+the reference bringing it in. The included jobs aren't jobs of the file:
+
+.. code-block:: python
+
+   pipelineFile = PipelineFile.FromFile(Path(".gitlab-ci.yml"), IncludeResolver(Path(".")))
+
+A missing job or key is an error, unless the file includes files that weren't read - another project's files, a URL,
+a template, a component, or a local file without a resolver. Then the job is built from what was read, and
+:attr:`~pyTooling.GitLab.PipelineFile.Job.Unresolved` names what it lacks, as ``extends .template`` or
+``!reference [.setup, script]``.
 
 
 .. _DATA/PipelineFile/Inputs:
@@ -330,6 +340,54 @@ A job's ``inputs`` - set when the job is run or retried by hand - are inputs too
 
 A value interpolating an input, as ``$[[ inputs.stage ]]``, is kept as written: it is known when the file is included
 only, so a stage or a needed job written that way isn't checked.
+
+
+.. _DATA/PipelineFile/Pipeline:
+
+Building a Pipeline
+*******************
+
+:meth:`~pyTooling.GitLab.PipelineFile.PipelineFile.ToPipeline` builds the pipeline a file defines as a
+:mod:`pyTooling.CI` model, as `pyTooling maps GitLab CI onto it
+<https://pyTooling.github.io/pyTooling/CI/Pipeline.html#gitlab-ci>`__. Each element links back to the job it was built
+from by :attr:`~pyTooling.GitLab.PipelineFile.DefinitionMixin.Definition`:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
+
+   * - Job
+     - Element
+   * - a job running a script
+     - :class:`~pyTooling.GitLab.PipelineFile.DefinedJob`
+   * - a job with ``parallel``
+     - :class:`~pyTooling.GitLab.PipelineFile.DefinedMatrix`, a :class:`~pyTooling.GitLab.PipelineFile.DefinedMatrixJob`
+       per instance, whose dimensions are the matrix' variables, or ``CI_NODE_INDEX`` for ``parallel: N``, named as
+       GitLab names it: ``test: [3.14, linux]``, ``test 1/3``
+   * - a trigger job
+     - :class:`~pyTooling.GitLab.PipelineFile.DefinedWorkflow`, whose reference is the other project or the child
+       pipeline's files; with ``parallel``, a :class:`~pyTooling.GitLab.PipelineFile.DefinedMatrixWorkflow` per instance
+   * - a hidden job
+     - none
+
+The pipeline is named by ``workflow:name``, or else by the file's name. A job without ``needs`` needs every element
+of the nearest earlier stage holding elements; ``needs`` replaces that, and ``needs: []`` needs nothing. A need of
+some instances of a matrix needs the whole matrix. A job's only rule is its
+:attr:`~pyTooling.GitLab.PipelineFile.Job.Condition`. The result converts into a graph:
+
+.. code-block:: python
+
+   from pathlib import Path
+   from pyTooling.GitLab.PipelineFile import IncludeResolver, PipelineFile
+
+   pipelineFile = PipelineFile.FromFile(Path(".gitlab-ci.yml"))
+   pipeline =     pipelineFile.ToPipeline(IncludeResolver(Path(".")))
+   graph =        pipeline.ToGraph()
+
+An :class:`~pyTooling.GitLab.PipelineFile.IncludeResolver` reads a trigger job's child pipeline from the repository's
+directory, if its files are local; the workflow then holds the child pipeline's elements, and
+:attr:`~pyTooling.GitLab.PipelineFile.ChildPipelineMixin.ChildFiles` the files. ``depth`` limits how many levels of
+child pipelines are expanded.
 
 
 .. _DATA/PipelineFile/Lines:

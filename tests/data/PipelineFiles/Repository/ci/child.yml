@@ -1,0 +1,11 @@
+# The child pipeline of the repository's configuration.
+stages: [one, two]
+
+first:
+  stage: one
+  script: a
+
+second:
+  stage: two
+  script: b
+  parallel: 2
