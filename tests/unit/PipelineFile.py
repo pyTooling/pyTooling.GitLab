@@ -28,15 +28,18 @@
 # SPDX-License-Identifier: Apache-2.0                                                                                  #
 # ==================================================================================================================== #
 """
-Unit tests for :mod:`pyTooling.GitLab.PipelineFile`: the configuration file, its stages, variables,
-jobs, needs, rules, workflow, includes and default, and how jobs extend each other.
+Unit tests for :mod:`pyTooling.GitLab.PipelineFile`.
+
+The configuration file, its stages, variables, jobs, needs, rules, workflow, includes and default, how jobs extend each
+other, parallel jobs and triggers.
 """
 from pathlib                       import Path
 from tempfile                      import TemporaryDirectory
 from textwrap                      import dedent
 
 from pyTooling.GitLab.PipelineFile import DEFAULT_STAGES, Job, Need, NeedKind, PipelineFile, PipelineFileError
-from pyTooling.GitLab.PipelineFile import Default, Include, IncludeKind, Rule, Variable, When, Workflow
+from pyTooling.GitLab.PipelineFile import Default, Include, IncludeKind, Parallel, Rule, Trigger, TriggerStrategy
+from pyTooling.GitLab.PipelineFile import Variable, When, Workflow
 from pyTooling.Testing             import Testcase, testsuite, testcase
 
 
@@ -1038,7 +1041,9 @@ class NeedErrors(Fixture):
 			PipelineFile.FromFile(self._Write("test:\n  needs:\n    - job: build\n      when: always\n"))
 		self.assertEqual("Need of job 'test' has unknown key 'when'.", str(context.exception))
 		self.assertEqual(4, context.exception.Line)
-		self.assertIn("Allowed keys: job, artifacts, optional, pipeline, project, ref.", context.exception.__notes__)
+		self.assertIn(
+			"Allowed keys: job, artifacts, optional, pipeline, project, ref, parallel.", context.exception.__notes__
+		)
 
 		with self.assertRaises(PipelineFileError) as context:
 			PipelineFile.FromFile(self._Write("test:\n  needs:\n    - job: build\n      artifacts: some\n"))
@@ -1457,7 +1462,7 @@ class IncludeErrors(Fixture):
 		with self.assertRaises(PipelineFileError) as context:
 			PipelineFile.FromFile(self._Write("include:\n  - ref: main\n"))
 		self.assertEqual("Include has none of its kinds' keys.", str(context.exception))
-		self.assertIn("Kinds: local, project, remote, template, component.", context.exception.__notes__)
+		self.assertIn("Kinds: local, project, remote, template, component, artifact.", context.exception.__notes__)
 
 		with self.assertRaises(PipelineFileError) as context:
 			PipelineFile.FromFile(self._Write("include:\n  - local: a.yml\n    template: b.yml\n"))
@@ -1688,3 +1693,261 @@ class ExtendsErrors(Fixture):
 		with self.assertRaises(PipelineFileError) as context:
 			PipelineFile.FromFile(self._Write(references))
 		self.assertIn("nests more than 10 levels.", str(context.exception))
+
+
+@testsuite("Parallel jobs and triggers")
+class ParallelAndTriggers(Fixture):
+	"""Reading 'parallel' and 'trigger', and constructing them."""
+
+	@testcase("Matrix")
+	def Matrix(self) -> None:
+		"""
+		A matrix entry contributes the product of its variables' lists, named as GitLab names the instances.
+
+		Checks job 'build'.
+		"""
+		build = PipelineFile.FromFile(DATA / "Parallel.yml").Jobs["build"]
+		parallel = build.Parallel
+
+		self.assertIs(build, parallel.Parent)
+		self.assertTrue(parallel.IsMatrix)
+		self.assertIsNone(parallel.Count)
+		self.assertEqual(({"PROVIDER": ("aws", ), "STACK": ("monitoring", "app1")},
+			{"PROVIDER": ("gcp", "vultr"), "STACK": ("data", )}), parallel.Matrix)
+		self.assertEqual(
+			[
+				{"PROVIDER": "aws", "STACK": "monitoring"},
+				{"PROVIDER": "aws", "STACK": "app1"},
+				{"PROVIDER": "gcp", "STACK": "data"},
+				{"PROVIDER": "vultr", "STACK": "data"}
+			],
+			parallel.Combinations
+		)
+		self.assertEqual(
+			["build: [aws, monitoring]", "build: [aws, app1]", "build: [gcp, data]", "build: [vultr, data]"],
+			parallel.InstanceNames
+		)
+
+	@testcase("Count")
+	def Count(self) -> None:
+		"""
+		'parallel: N' runs a job N times, named 'job i/N'.
+
+		Checks job 'test'.
+		"""
+		parallel = PipelineFile.FromFile(DATA / "Parallel.yml").Jobs["test"].Parallel
+
+		self.assertFalse(parallel.IsMatrix)
+		self.assertEqual(3, parallel.Count)
+		self.assertEqual((), parallel.Matrix)
+		self.assertEqual(["test 1/3", "test 2/3", "test 3/3"], parallel.InstanceNames)
+
+	@testcase("Needed instances")
+	def NeededInstances(self) -> None:
+		"""
+		A need's 'parallel.matrix' names the needed instances.
+
+		Checks the need of job 'test'.
+		"""
+		need = PipelineFile.FromFile(DATA / "Parallel.yml").Jobs["test"].Needs[0]
+
+		self.assertIs(need, need.Parallel.Parent)
+		self.assertEqual(["build: [aws, app1]"], need.Parallel.InstanceNames)
+		self.assertIsNone(PipelineFile.FromFile(DATA / "Needs.yml").Jobs["linux:rspec"].Needs[0].Parallel)
+
+	@testcase("Child pipelines")
+	def ChildPipelines(self) -> None:
+		"""
+		A trigger including files starts a child pipeline; an include of a job's artifact names the job.
+
+		Checks jobs 'child' and 'single'.
+		"""
+		jobs = PipelineFile.FromFile(DATA / "Parallel.yml").Jobs
+		trigger = jobs["child"].Trigger
+
+		self.assertIs(jobs["child"], trigger.Parent)
+		self.assertTrue(trigger.IsChildPipeline)
+		self.assertIsNone(trigger.Project)
+		self.assertIs(TriggerStrategy.Mirror, trigger.Strategy)
+		self.assertEqual(2, len(trigger.Includes))
+		self.assertIs(IncludeKind.Local, trigger.Includes[0].Kind)
+		self.assertEqual({"environment": "staging"}, trigger.Includes[0].Inputs)
+		self.assertIs(trigger, trigger.Includes[0].Parent)
+		self.assertIs(IncludeKind.Artifact, trigger.Includes[1].Kind)
+		self.assertEqual("generated.yml", trigger.Includes[1].Location)
+		self.assertEqual("build", trigger.Includes[1].ArtifactJob)
+
+		single = jobs["single"].Trigger
+		self.assertEqual("/ci/single.yml", single.Includes[0].Location)
+		self.assertIsNone(single.Strategy)
+
+	@testcase("Other projects' pipelines")
+	def OtherProjects(self) -> None:
+		"""
+		A trigger naming a project, as mapping or as string, starts that project's pipeline.
+
+		Checks jobs 'downstream' and 'short'.
+		"""
+		jobs = PipelineFile.FromFile(DATA / "Parallel.yml").Jobs
+
+		downstream = jobs["downstream"].Trigger
+		self.assertFalse(downstream.IsChildPipeline)
+		self.assertEqual("group/other", downstream.Project)
+		self.assertEqual("main", downstream.Branch)
+		self.assertIs(TriggerStrategy.Depend, downstream.Strategy)
+		self.assertEqual([], downstream.Includes)
+
+		self.assertEqual("group/short", jobs["short"].Trigger.Project)
+		self.assertIsNone(jobs["short"].Trigger.Branch)
+		self.assertIsNone(jobs["build"].Trigger)
+
+	@testcase("Constructed")
+	def Constructed(self) -> None:
+		"""
+		A parallel and a trigger constructed with a job as parent are attached to it, and so are those passed to it.
+
+		Constructs both both ways.
+		"""
+		job = Job("a", 1)
+		parallel = Parallel(2, 4, parent=job)
+		trigger = Trigger(3, "group/other", parent=job)
+		self.assertIs(parallel, job.Parallel)
+		self.assertIs(trigger, job.Trigger)
+		self.assertEqual(["a 1/4", "a 2/4", "a 3/4", "a 4/4"], parallel.InstanceNames)
+
+		include = Include(IncludeKind.Local, "/ci/child.yml", 5)
+		passedTrigger = Trigger(4, includes=[include])
+		passedParallel = Parallel(6, matrix=[{"A": ["1", "2"]}])
+		other = Job("b", 3, parallel=passedParallel, trigger=passedTrigger)
+		self.assertIs(other, passedTrigger.Parent)
+		self.assertIs(passedTrigger, include.Parent)
+		self.assertEqual(["b: [1]", "b: [2]"], passedParallel.InstanceNames)
+
+		need = Need("b", 7, parallel=Parallel(8, matrix=[{"A": ["1"]}]))
+		self.assertEqual(["b: [1]"], need.Parallel.InstanceNames)
+
+
+@testsuite("Parameter checks of parallel and trigger")
+class ParallelParameters(Testcase):
+	"""The constructors of parallels and triggers reject parameters of the wrong type or value."""
+
+	@testcase("Parallel")
+	def ParallelChecks(self) -> None:
+		"""
+		A parallel has a count in range 1..200 or a matrix of mappings of strings, not both.
+
+		Checks each exception.
+		"""
+		with self.assertRaises(ValueError) as context:
+			Parallel(1)
+		self.assertEqual("Parameters 'count' and 'matrix' are both given, or both None.", str(context.exception))
+
+		with self.assertRaises(ValueError) as context:
+			Parallel(1, 2, [{"A": ["1"]}])
+		self.assertEqual("Parameters 'count' and 'matrix' are both given, or both None.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Parallel(1, "3")
+		self.assertEqual("Parameter 'count' is not of type 'int'.", str(context.exception))
+
+		with self.assertRaises(ValueError) as context:
+			Parallel(1, 201)
+		self.assertEqual("Parameter 'count' is out of range 1..200.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Parallel(1, matrix=["A"])
+		self.assertEqual("An entry of parameter 'matrix' is not a mapping.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Parallel(1, matrix=[{"A": [1]}])
+		self.assertEqual("Variable 'A' of parameter 'matrix' has values not of type 'str'.", str(context.exception))
+
+	@testcase("Trigger")
+	def TriggerChecks(self) -> None:
+		"""
+		A trigger's project and branch are strings, its strategy a TriggerStrategy, its includes Includes.
+
+		Checks each TypeError, and those of the job and the need.
+		"""
+		with self.assertRaises(TypeError) as context:
+			Trigger(1, 1)
+		self.assertEqual("Parameter 'project' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Trigger(1, strategy="mirror")
+		self.assertEqual("Parameter 'strategy' is not of type 'TriggerStrategy'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Trigger(1, includes=["/ci/a.yml"])
+		self.assertEqual("An element of parameter 'includes' is not of type 'Include'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Job("a", 1, trigger="group/other")
+		self.assertEqual("Parameter 'trigger' is not of type 'Trigger'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Job("a", 1, parallel=3)
+		self.assertEqual("Parameter 'parallel' is not of type 'Parallel'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Need("a", 1, parallel=3)
+		self.assertEqual("Parameter 'parallel' is not of type 'Parallel'.", str(context.exception))
+
+
+@testsuite("Malformed parallel and trigger")
+class ParallelErrors(Fixture):
+	"""A malformed 'parallel' or 'trigger' raises PipelineFileError, naming file and line."""
+
+	@testcase("Malformed parallel")
+	def MalformedParallel(self) -> None:
+		"""
+		'parallel' is a count in range 1..200 or a matrix of mappings; a need's 'parallel' a matrix.
+
+		Checks message and line of each error.
+		"""
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("test:\n  parallel: 300\n"))
+		self.assertEqual("Key 'parallel' of job 'test' is out of range 1..200.", str(context.exception))
+		self.assertEqual(2, context.exception.Line)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("test:\n  parallel: many\n"))
+		self.assertEqual(
+			"Key 'parallel' of job 'test' is neither a count nor a mapping with 'matrix'.", str(context.exception)
+		)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("test:\n  parallel:\n    matrix: [A]\n"))
+		self.assertEqual("Key 'parallel.matrix' of job 'test' is not a list of mappings.", str(context.exception))
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("test:\n  parallel:\n    matrix:\n      - A: [[1]]\n"))
+		self.assertEqual(
+			"Variable 'A' of the matrix of job 'test' is neither a value nor a list of values.", str(context.exception)
+		)
+		self.assertEqual(4, context.exception.Line)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("b:\n  script: x\nt:\n  needs:\n    - job: b\n      parallel: 2\n"))
+		self.assertEqual("Key 'parallel' of a need of job 't' has no 'matrix' key.", str(context.exception))
+		self.assertEqual(5, context.exception.Line)
+
+	@testcase("Malformed trigger")
+	def MalformedTrigger(self) -> None:
+		"""
+		'trigger' is a project or a mapping with 'include' or 'project', whose strategy GitLab knows.
+
+		Checks message, line and note of each error.
+		"""
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("t:\n  trigger:\n    branch: main\n"))
+		self.assertEqual(
+			"Key 'trigger' of job 't' is neither a project nor a mapping with 'include' or 'project'.", str(context.exception)
+		)
+		self.assertEqual(2, context.exception.Line)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("t:\n  trigger:\n    project: g/p\n    strategy: wait\n"))
+		self.assertEqual("Key 'strategy' of the trigger of job 't' is not a known value.", str(context.exception))
+		self.assertEqual(4, context.exception.Line)
+		self.assertIn("Allowed values: depend, mirror.", context.exception.__notes__)
