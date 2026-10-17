@@ -56,7 +56,7 @@ from typing                    import Optional as Nullable, Any, ClassVar, Hasha
 
 from pyTooling.CI              import CIError, JSONObject, MatrixInstanceMixin, Outcome
 from pyTooling.CI              import Job as CIJob, JobGroup as CIJobGroup, Matrix as CIMatrix
-from pyTooling.CI              import Pipeline as CIPipeline, PipelineGroup as CIPipelineGroup
+from pyTooling.CI              import Pipeline as CIPipeline, PipelineGroup as CIPipelineGroup, Workflow as CIWorkflow
 from pyTooling.Common          import getFullyQualifiedName, parseISO8601Timestamp, StringEnum
 from pyTooling.Decorators      import export, readonly
 from pyTooling.GenericPath.URL import URL
@@ -602,9 +602,10 @@ class PipelineGroup(CIPipelineGroup):
 @export
 class PipelineContentsMixin(metaclass=ExtendedType, mixin=True, expects=("_elements", "_matrices", "_workflows")):
 	"""
-	Mixin-class for the groups holding what GitLab lists for a pipeline.
+	Mixin-class for the groups holding what GitLab lists for a pipeline: a pipeline and a downstream pipeline.
 
-	It adds the jobs GitLab lists for a pipeline.
+	It adds the jobs GitLab lists for a pipeline and the trigger jobs starting downstream pipelines, and the
+	dependencies the stages imply.
 	"""
 
 	def _AddJobs(self, jobs: Iterable[JSONObject], path: str) -> None:
@@ -638,6 +639,48 @@ class PipelineContentsMixin(metaclass=ExtendedType, mixin=True, expects=("_eleme
 
 				MatrixJob.Parse(job, jobPath, jobName, dimensions, parent=matrix)
 
+	def _AddBridges(
+		self,
+		bridges:    Iterable[JSONObject],
+		downstream: Nullable[Mapping[Union[int, str], JSONObject]],
+		path:       str
+	) -> None:
+		"""
+		Add a downstream pipeline for every trigger job GitLab listed, in the order it created them.
+
+		:param bridges:      The trigger jobs, as listed by ``GET .../pipelines/{pipeline_id}/bridges``.
+		:param downstream:   The downstream pipelines' payloads, by the downstream pipeline's identifier, or ``None``.
+		:param path:         Name of the trigger jobs' list, for an exception's message.
+		:raises TypeError:   If an element of parameter 'bridges' is not of type :class:`dict`.
+		:raises GitLabError: If a trigger job's field ``name`` is missing.
+		:raises GitLabError: If a field holds a value GitLab doesn't document.
+		"""
+		bridgeList = list(bridges)
+		for position, bridge in enumerate(bridgeList):
+			if not isinstance(bridge, dict):
+				ex = TypeError(f"Trigger job {position} is not of type 'dict'.")
+				ex.add_note(f"Got type '{getFullyQualifiedName(bridge)}'.")
+				raise ex
+
+		for position, bridge in sorted(enumerate(bridgeList), key=self._CreationOrder):
+			bridgePath = f"{path}[{position}]"
+			if (fullName := bridge.get("name", None)) is None:
+				raise GitLabError(f"Field '{bridgePath}.name' is missing.")
+
+			payload = None
+			if downstream is not None and (child := bridge.get("downstream_pipeline", None)) is not None:
+				if (payload := downstream.get(child.get("id", None), None)) is None:
+					payload = downstream.get(str(child.get("id", None)), None)
+
+			bridgeName, dimensions = _splitMatrixJobName(fullName)
+			if dimensions is None:
+				DownstreamPipeline.Parse(bridge, payload, bridgePath, parent=self)
+			else:
+				if (matrix := self._matrices.get(bridgeName, None)) is None:
+					matrix = CIMatrix(bridgeName, parent=self)
+
+				MatrixDownstreamPipeline.Parse(bridge, payload, bridgePath, bridgeName, dimensions, parent=matrix)
+
 	@staticmethod
 	def _CreationOrder(entry: tuple[int, JSONObject]) -> tuple[bool, int]:
 		"""
@@ -650,6 +693,60 @@ class PipelineContentsMixin(metaclass=ExtendedType, mixin=True, expects=("_eleme
 
 		return (identifier is None, 0 if identifier is None else identifier)
 
+	def ApplyNeeds(self, stages: Iterable[str], needs: Nullable[Mapping[str, Iterable[str]]] = None) -> None:
+		"""
+		Add the dependencies between the elements of this pipeline, which the stages and the ``needs`` imply.
+
+		GitLab's REST API reports a job's stage, but neither the order of the stages nor a job's ``needs``; both are
+		in the pipeline file. An element listed in parameter 'needs' needs the siblings named there - a matrix or a
+		downstream pipeline by its name, ``[]`` needing nothing. Every other element needs every element of the
+		nearest earlier stage holding elements, as GitLab runs them. A downstream pipeline's contents aren't touched:
+		apply its own stages to it.
+
+		:param stages:       The pipeline's stages, in their order.
+		:param needs:        Optional, the names an element needs, by the element's name. Default: ``None``.
+		:raises ValueError:  If parameter 'stages' is ``None``.
+		:raises TypeError:   If parameter 'stages' is not iterable.
+		:raises TypeError:   If parameter 'needs' is not a mapping.
+		:raises GitLabError: If an element's stage is unknown or not one of parameter 'stages'.
+		:raises GitLabError: If an element needs a name no sibling has.
+		"""
+		if stages is None:
+			raise ValueError("Parameter 'stages' is None.")
+		elif not isinstance(stages, Iterable) or isinstance(stages, str):
+			ex = TypeError("Parameter 'stages' is not iterable.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(stages)}'.")
+			raise ex
+
+		if needs is not None and not isinstance(needs, Mapping):
+			ex = TypeError("Parameter 'needs' is not a mapping ('dict', ...).")
+			ex.add_note(f"Got type '{getFullyQualifiedName(needs)}'.")
+			raise ex
+
+		stageIndex = {stage: index for index, stage in enumerate(stages)}
+		byStage: dict[int, list[Any]] = {}
+		elementStages = {}
+		for element in self._elements:
+			stage = element.Instances[0].Stage if isinstance(element, CIMatrix) else element.Stage
+			if (index := stageIndex.get(stage, None)) is None:
+				ex = GitLabError(f"Element '{element.Name}' of '{self}' is in stage '{stage}', which isn't one of the stages.")
+				ex.add_note(f"Stages: {', '.join(stageIndex)}.")
+				raise ex
+
+			byStage.setdefault(index, []).append(element)
+			elementStages[element] = index
+
+		siblings = {element.Name: element for element in self._elements}
+		for element, index in elementStages.items():
+			if needs is not None and element.Name in needs:
+				for name in needs[element.Name]:
+					if (need := siblings.get(name, None)) is None:
+						raise GitLabError(f"Element '{element.Name}' of '{self}' needs '{name}', which no sibling is named.")
+
+					element.AddNeed(need)
+			elif len(earlier := [stage for stage in byStage if stage < index]) > 0:
+				for need in byStage[max(earlier)]:
+					element.AddNeed(need)
 
 
 @export
@@ -850,10 +947,12 @@ class Pipeline(CIPipeline, StatusMixin, PipelineContentsMixin):
 	@classmethod
 	def Parse(
 		cls,
-		pipeline: JSONObject,
-		jobs:     Nullable[Iterable[JSONObject]] = None,
+		pipeline:   JSONObject,
+		jobs:       Nullable[Iterable[JSONObject]]                 = None,
+		bridges:    Nullable[Iterable[JSONObject]]                 = None,
+		downstream: Nullable[Mapping[Union[int, str], JSONObject]] = None,
 		*,
-		parent:   Nullable[PipelineGroup]        = None
+		parent:     Nullable[PipelineGroup]                        = None
 	) -> Self:
 		"""
 		Build a pipeline and its tree from the JSON objects the GitLab REST API answers with.
@@ -861,16 +960,26 @@ class Pipeline(CIPipeline, StatusMixin, PipelineContentsMixin):
 		A pipeline without a ``name`` - GitLab reports one only when the pipeline file sets ``workflow:name`` - is named
 		by its number within the project, e.g. ``#47177``. The jobs are added in the order GitLab created them. A job
 		named as an instance of a matrix - ``test: [3.14, linux]`` or ``test 1/4`` - becomes a :class:`MatrixJob` below
-		a :class:`~pyTooling.CI.Matrix` named ``test``.
+		a :class:`~pyTooling.CI.Matrix` named ``test``. A trigger job becomes a :class:`DownstreamPipeline`, holding the
+		downstream pipeline's jobs if parameter 'downstream' carries them.
+
+		Parameter 'downstream' maps a downstream pipeline's identifier - an :class:`int`, or its text as a JSON file's
+		key - to a JSON object with the downstream pipeline's payloads: ``pipeline``, ``jobs``, ``bridges`` and its own
+		``downstream``, in the shape of this method's parameters.
 
 		:param pipeline:     The pipeline, as returned by ``GET /projects/{id}/pipelines/{pipeline_id}``.
 		:param jobs:         Optional, the pipeline's jobs, as listed by ``GET .../pipelines/{pipeline_id}/jobs``.
+		:param bridges:      Optional, the pipeline's trigger jobs, as listed by
+		                     ``GET .../pipelines/{pipeline_id}/bridges``.
+		:param downstream:   Optional, the downstream pipelines' payloads, by the downstream pipeline's identifier.
+		                     Default: ``None``.
 		:param parent:       Optional, reference to the group of the commit's pipelines. Default: ``None``.
-		:returns:            The pipeline, with its matrices and jobs attached.
+		:returns:            The pipeline, with its matrices, jobs and downstream pipelines attached.
 		:raises TypeError:   If parameter 'pipeline' is not of type :class:`dict`.
 		:raises TypeError:   If an element of parameter 'jobs' is not of type :class:`dict`.
+		:raises TypeError:   If an element of parameter 'bridges' is not of type :class:`dict`.
 		:raises GitLabError: If field ``id`` is missing.
-		:raises GitLabError: If a job's field ``name`` is missing.
+		:raises GitLabError: If a job's or a trigger job's field ``name`` is missing.
 		:raises GitLabError: If a field holds a value GitLab doesn't document.
 		"""
 		if not isinstance(pipeline, dict):
@@ -905,6 +1014,9 @@ class Pipeline(CIPipeline, StatusMixin, PipelineContentsMixin):
 
 		if jobs is not None:
 			result._AddJobs(jobs, "jobs")
+
+		if bridges is not None:
+			result._AddBridges(bridges, downstream, "bridges")
 
 		return result
 
@@ -1278,3 +1390,401 @@ class MatrixJob(Job, MatrixInstanceMixin):
 		fields["name"] = name
 
 		return cls(**fields, dimensions=dimensions, parent=parent)
+
+
+@export
+class DownstreamPipeline(CIWorkflow, StatusMixin, JobMixin, PipelineContentsMixin):
+	"""
+	A downstream pipeline, started by a trigger job: a child pipeline of the same project, or a multi-project pipeline.
+
+	It stands where its trigger job stands - GitLab calls that job a *bridge* - and is named after it, but it reports
+	the downstream pipeline's own status, URL and times. What GitLab reports about the trigger job - its identifier,
+	stage, status and URL - is kept beside them. A child pipeline's jobs, matrices and own downstream pipelines are its
+	contents, if they were read; a multi-project pipeline names its project as :attr:`~pyTooling.CI.Workflow.Reference`.
+	"""
+
+	_downstreamID:        Nullable[int]     #: GitLab's identifier of the downstream pipeline.
+	_downstreamProjectID: Nullable[int]     #: GitLab's identifier of the downstream pipeline's project.
+	_triggerStatus:       Nullable[Status]  #: State the trigger job is in.
+	_triggerURL:          Nullable[URL]     #: URL of the trigger job in GitLab's web interface.
+
+	def __init__(
+		self,
+		name:                str,
+		identifier:          Nullable[int]                    = None,
+		stage:               Nullable[str]                    = None,
+		status:              Nullable[Status]                 = None,
+		allowFailure:        Nullable[bool]                   = None,
+		createdAt:           Nullable[datetime]               = None,
+		startedAt:           Nullable[datetime]               = None,
+		completedAt:         Nullable[datetime]               = None,
+		queuedDuration:      Nullable[float]                  = None,
+		url:                 Nullable[URL]                    = None,
+		downstreamID:        Nullable[int]                    = None,
+		downstreamProjectID: Nullable[int]                    = None,
+		triggerStatus:       Nullable[Status]                 = None,
+		triggerURL:          Nullable[URL]                    = None,
+		*,
+		reference:           Nullable[str]                    = None,
+		keyValuePairs:       Nullable[Mapping[Hashable, Any]] = None,
+		parent:              Nullable[CIWorkflow]             = None
+	) -> None:
+		"""
+		Initializes a downstream pipeline.
+
+		:param name:                Name of the trigger job.
+		:param identifier:          Optional, GitLab's identifier of the trigger job. Default: ``None``.
+		:param stage:               Optional, stage the trigger job is listed in. Default: ``None``.
+		:param status:              Optional, state the downstream pipeline is in. Default: ``None``.
+		:param allowFailure:        Optional, ``True``, if the trigger job may fail without failing its pipeline.
+		                            Default: ``None``.
+		:param createdAt:           Optional, time the downstream pipeline was created. Default: ``None``.
+		:param startedAt:           Optional, time the downstream pipeline started. Default: ``None``.
+		:param completedAt:         Optional, time the downstream pipeline finished. Default: ``None``.
+		:param queuedDuration:      Optional, seconds the trigger job waited in GitLab's queue. Default: ``None``.
+		:param url:                 Optional, URL of the downstream pipeline in GitLab's web interface. Default: ``None``.
+		:param downstreamID:        Optional, GitLab's identifier of the downstream pipeline. Default: ``None``.
+		:param downstreamProjectID: Optional, GitLab's identifier of the downstream pipeline's project. Default: ``None``.
+		:param triggerStatus:       Optional, state the trigger job is in. Default: ``None``.
+		:param triggerURL:          Optional, URL of the trigger job in GitLab's web interface. Default: ``None``.
+		:param reference:           Optional, the project of a multi-project pipeline, e.g. ``gitlab-org/gitlab``.
+		                            Default: ``None``.
+		:param keyValuePairs:       Optional, mapping (dictionary) of key-value-pairs. Default: ``None``.
+		:param parent:              Optional, reference to the pipeline containing the trigger job. Default: ``None``.
+		:raises TypeError:          If parameter 'downstreamID' is not of type :class:`int`.
+		:raises TypeError:          If parameter 'downstreamProjectID' is not of type :class:`int`.
+		:raises TypeError:          If parameter 'triggerStatus' is not of type :class:`Status`.
+		:raises TypeError:          If parameter 'triggerURL' is not of type :class:`~pyTooling.GenericPath.URL.URL`.
+		"""
+		for parameterName, number in (
+			("downstreamID",        downstreamID),
+			("downstreamProjectID", downstreamProjectID)
+		):
+			if number is not None and (isinstance(number, bool) or not isinstance(number, int)):
+				ex = TypeError(f"Parameter '{parameterName}' is not of type 'int'.")
+				ex.add_note(f"Got type '{getFullyQualifiedName(number)}'.")
+				raise ex
+
+		if triggerStatus is not None and not isinstance(triggerStatus, Status):
+			ex = TypeError("Parameter 'triggerStatus' is not of type 'Status'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(triggerStatus)}'.")
+			raise ex
+
+		if triggerURL is not None and not isinstance(triggerURL, URL):
+			ex = TypeError("Parameter 'triggerURL' is not of type 'URL'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(triggerURL)}'.")
+			raise ex
+
+		super().__init__(
+			name, reference=reference, createdAt=createdAt, startedAt=startedAt, completedAt=completedAt,
+			keyValuePairs=keyValuePairs, parent=parent
+		)
+		StatusMixin.__init__(self, status, None, url)
+		JobMixin.__init__(self, identifier, stage, allowFailure, queuedDuration)
+
+		self._downstreamID =        downstreamID
+		self._downstreamProjectID = downstreamProjectID
+		self._triggerStatus =       triggerStatus
+		self._triggerURL =          triggerURL
+
+	@readonly
+	def DownstreamID(self) -> Nullable[int]:
+		"""
+		Read-only property to access GitLab's identifier of the downstream pipeline (:attr:`_downstreamID`).
+
+		:returns: The identifier, or ``None`` while the trigger job hasn't started a pipeline.
+		"""
+		return self._downstreamID
+
+	@readonly
+	def DownstreamProjectID(self) -> Nullable[int]:
+		"""
+		Read-only property to access the identifier of the downstream pipeline's project (:attr:`_downstreamProjectID`).
+
+		:returns: The identifier, or ``None`` while the trigger job hasn't started a pipeline.
+		"""
+		return self._downstreamProjectID
+
+	@readonly
+	def TriggerStatus(self) -> Nullable[Status]:
+		"""
+		Read-only property to access the state the trigger job is in (:attr:`_triggerStatus`).
+
+		It differs from the downstream pipeline's :attr:`~StatusMixin.Status` for a trigger job without
+		``strategy: depend``, which succeeds once it started the downstream pipeline, and for a trigger job waiting to be
+		started by hand, which hasn't started a pipeline yet.
+
+		:returns: The state, or ``None`` if GitLab reported none.
+		"""
+		return self._triggerStatus
+
+	@readonly
+	def TriggerURL(self) -> Nullable[URL]:
+		"""
+		Read-only property to access the trigger job's URL in GitLab's web interface (:attr:`_triggerURL`).
+
+		:returns: The URL, or ``None`` if GitLab reported none.
+		"""
+		return self._triggerURL
+
+	@readonly
+	def IsMultiProject(self) -> Nullable[bool]:
+		"""
+		Read-only property to return whether the downstream pipeline belongs to another project.
+
+		:returns: ``True`` for a multi-project pipeline, ``False`` for a child pipeline, or ``None`` if either project
+		          isn't known.
+		"""
+		if self._downstreamProjectID is None or self._pipeline is None or self._pipeline.ProjectID is None:
+			return None
+
+		return self._downstreamProjectID != self._pipeline.ProjectID
+
+	@staticmethod
+	def _CheckPayload(payload: Nullable[JSONObject], path: str) -> Nullable[JSONObject]:
+		"""
+		Check the downstream pipeline's payloads, and return the downstream pipeline's own payload.
+
+		:param payload:    The downstream pipeline's payloads, or ``None``.
+		:param path:       Position of the trigger job, for an exception's message.
+		:returns:          The downstream pipeline, as returned by ``GET /projects/{id}/pipelines/{pipeline_id}``, or
+		                   ``None``, if it wasn't read.
+		:raises TypeError: If parameter 'payload' is not of type :class:`dict`.
+		"""
+		if payload is None:
+			return None
+		elif not isinstance(payload, dict):
+			ex = TypeError(f"Payload of '{path}' is not of type 'dict'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(payload)}'.")
+			raise ex
+
+		return payload.get("pipeline", None)
+
+	@classmethod
+	def _ParseFields(cls, bridge: JSONObject, pipeline: Nullable[JSONObject], path: str) -> dict[str, Any]:
+		"""
+		Read the fields of a downstream pipeline from the JSON objects the GitLab REST API answers with.
+
+		The downstream pipeline's status, URL and times are taken from its own payload, if it was read; otherwise from
+		the summary GitLab gives in the trigger job's ``downstream_pipeline``, which has no start, and whose last update
+		is the pipeline's completion once it ended.
+
+		:param bridge:       The trigger job, as listed by ``GET /projects/{id}/pipelines/{pipeline_id}/bridges``.
+		:param pipeline:     The downstream pipeline, as returned by ``GET /projects/{id}/pipelines/{pipeline_id}``, or
+		                     ``None``, if it wasn't read.
+		:param path:         Position of the trigger job, for an exception's message.
+		:returns:            The values of the initializer, by parameter name.
+		:raises TypeError:   If parameter 'bridge' is not of type :class:`dict`.
+		:raises TypeError:   If parameter 'pipeline' is not of type :class:`dict`.
+		:raises GitLabError: If field ``name`` is missing.
+		:raises GitLabError: If a field holds a value GitLab doesn't document.
+		"""
+		if not isinstance(bridge, dict):
+			ex = TypeError("Parameter 'bridge' is not of type 'dict'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(bridge)}'.")
+			raise ex
+
+		if pipeline is not None and not isinstance(pipeline, dict):
+			ex = TypeError(f"Downstream pipeline of '{path}' is not of type 'dict'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(pipeline)}'.")
+			raise ex
+
+		if (name := bridge.get("name", None)) is None:
+			raise GitLabError(f"Field '{path}.name' is missing.")
+
+		if (summary := bridge.get("downstream_pipeline", None)) is None:
+			summary = {}
+
+		if pipeline is None:
+			ownPath =     f"{path}.downstream_pipeline"
+			status =      Status.Parse(summary.get("status", None))
+			createdAt =   _parseISO8601Timestamp(summary.get("created_at", None), f"{ownPath}.created_at")
+			startedAt =   None
+			completedAt = None
+			if status is not None and status.ToOutcome() is not None:
+				completedAt = _parseISO8601Timestamp(summary.get("updated_at", None), f"{ownPath}.updated_at")
+			url =         _parseURL(summary.get("web_url", None))
+		else:
+			ownPath =     f"{path}.pipeline"
+			status =      Status.Parse(pipeline.get("status", None))
+			createdAt =   _parseISO8601Timestamp(pipeline.get("created_at", None), f"{ownPath}.created_at")
+			startedAt =   _parseISO8601Timestamp(pipeline.get("started_at", None), f"{ownPath}.started_at")
+			completedAt = _parseISO8601Timestamp(pipeline.get("finished_at", None), f"{ownPath}.finished_at")
+			url =         _parseURL(pipeline.get("web_url", None))
+
+		reference = None
+		if (projectID := bridge.get("pipeline", {}).get("project_id", None)) is not None and url is not None:
+			if summary.get("project_id", None) not in (None, projectID):
+				reference = str(url.Path).strip("/").partition("/-/")[0]
+
+		return {
+			"name":                name,
+			"identifier":          bridge.get("id", None),
+			"stage":               bridge.get("stage", None),
+			"status":              status,
+			"allowFailure":        bridge.get("allow_failure", None),
+			"createdAt":           createdAt,
+			"startedAt":           startedAt,
+			"completedAt":         completedAt,
+			"queuedDuration":      bridge.get("queued_duration", None),
+			"url":                 url,
+			"downstreamID":        summary.get("id", None),
+			"downstreamProjectID": summary.get("project_id", None),
+			"triggerStatus":       Status.Parse(bridge.get("status", None)),
+			"triggerURL":          _parseURL(bridge.get("web_url", None)),
+			"reference":           reference,
+		}
+
+	def _AddContents(self, payload: Nullable[JSONObject], path: str) -> None:
+		"""
+		Add the downstream pipeline's jobs and trigger jobs from its payloads.
+
+		:param payload:      The downstream pipeline's payloads - ``jobs``, ``bridges``, ``downstream`` -, or ``None``.
+		:param path:         Position of the trigger job, for an exception's message.
+		:raises GitLabError: If a field holds a value GitLab doesn't document.
+		"""
+		if payload is None:
+			return
+
+		if (jobs := payload.get("jobs", None)) is not None:
+			self._AddJobs(jobs, f"{path}.jobs")
+
+		if (bridges := payload.get("bridges", None)) is not None:
+			self._AddBridges(bridges, payload.get("downstream", None), f"{path}.bridges")
+
+	@classmethod
+	def Parse(
+		cls,
+		bridge:  JSONObject,
+		payload: Nullable[JSONObject]     = None,
+		path:    str                      = "bridge",
+		*,
+		parent:  Nullable[CIWorkflow]     = None
+	) -> Self:
+		"""
+		Build a downstream pipeline from the JSON objects the GitLab REST API answers with.
+
+		:param bridge:       The trigger job, as listed by ``GET /projects/{id}/pipelines/{pipeline_id}/bridges``.
+		:param payload:      Optional, the downstream pipeline's payloads - ``pipeline``, ``jobs``, ``bridges`` and
+		                     ``downstream`` in the shape of :meth:`Pipeline.Parse`'s parameters. Default: ``None``.
+		:param path:         Optional, position of the trigger job, for an exception's message. Default: ``'bridge'``.
+		:param parent:       Optional, reference to the pipeline containing the trigger job. Default: ``None``.
+		:returns:            The downstream pipeline, with its contents attached.
+		:raises TypeError:   If parameter 'bridge' is not of type :class:`dict`.
+		:raises TypeError:   If parameter 'payload' is not of type :class:`dict`.
+		:raises GitLabError: If field ``name`` is missing.
+		:raises GitLabError: If a field holds a value GitLab doesn't document.
+		"""
+		pipeline = cls._CheckPayload(payload, path)
+		result = cls(**cls._ParseFields(bridge, pipeline, path), parent=parent)
+		result._AddContents(payload, path)
+
+		return result
+
+
+@export
+class MatrixDownstreamPipeline(DownstreamPipeline, MatrixInstanceMixin):
+	"""
+	One instance of a trigger job produced by ``parallel:matrix``, and the downstream pipeline it started.
+
+	It is named like a :class:`MatrixJob`, as GitLab names it: ``deploy: [staging]``.
+	"""
+
+	_PARENT_TYPE: ClassVar[Nullable[type]] = CIMatrix  #: A matrix instance is contained in a matrix.
+
+	def __init__(
+		self,
+		name:                str,
+		dimensions:          Nullable[Mapping[str, Any]]      = None,
+		identifier:          Nullable[int]                    = None,
+		stage:               Nullable[str]                    = None,
+		status:              Nullable[Status]                 = None,
+		allowFailure:        Nullable[bool]                   = None,
+		createdAt:           Nullable[datetime]               = None,
+		startedAt:           Nullable[datetime]               = None,
+		completedAt:         Nullable[datetime]               = None,
+		queuedDuration:      Nullable[float]                  = None,
+		url:                 Nullable[URL]                    = None,
+		downstreamID:        Nullable[int]                    = None,
+		downstreamProjectID: Nullable[int]                    = None,
+		triggerStatus:       Nullable[Status]                 = None,
+		triggerURL:          Nullable[URL]                    = None,
+		*,
+		reference:           Nullable[str]                    = None,
+		keyValuePairs:       Nullable[Mapping[Hashable, Any]] = None,
+		parent:              Nullable[CIMatrix]               = None
+	) -> None:
+		"""
+		Initializes one instance of a trigger job produced by a matrix.
+
+		:param name:                Name of the trigger job, without the instance's values.
+		:param dimensions:          Optional, the dimensions' names and values this instance ran with. Default: ``None``.
+		:param identifier:          Optional, GitLab's identifier of the trigger job. Default: ``None``.
+		:param stage:               Optional, stage the trigger job is listed in. Default: ``None``.
+		:param status:              Optional, state the downstream pipeline is in. Default: ``None``.
+		:param allowFailure:        Optional, ``True``, if the trigger job may fail without failing its pipeline.
+		                            Default: ``None``.
+		:param createdAt:           Optional, time the downstream pipeline was created. Default: ``None``.
+		:param startedAt:           Optional, time the downstream pipeline started. Default: ``None``.
+		:param completedAt:         Optional, time the downstream pipeline finished. Default: ``None``.
+		:param queuedDuration:      Optional, seconds the trigger job waited in GitLab's queue. Default: ``None``.
+		:param url:                 Optional, URL of the downstream pipeline in GitLab's web interface. Default: ``None``.
+		:param downstreamID:        Optional, GitLab's identifier of the downstream pipeline. Default: ``None``.
+		:param downstreamProjectID: Optional, GitLab's identifier of the downstream pipeline's project. Default: ``None``.
+		:param triggerStatus:       Optional, state the trigger job is in. Default: ``None``.
+		:param triggerURL:          Optional, URL of the trigger job in GitLab's web interface. Default: ``None``.
+		:param reference:           Optional, the project of a multi-project pipeline. Default: ``None``.
+		:param keyValuePairs:       Optional, mapping (dictionary) of key-value-pairs. Default: ``None``.
+		:param parent:              Optional, reference to the matrix containing the instance. Default: ``None``.
+		"""
+		super().__init__(
+			name, identifier, stage, status, allowFailure, createdAt, startedAt, completedAt, queuedDuration, url,
+			downstreamID, downstreamProjectID, triggerStatus, triggerURL, reference=reference, keyValuePairs=keyValuePairs,
+			parent=parent
+		)
+		MatrixInstanceMixin.__init__(self, dimensions)
+
+	def __str__(self) -> str:
+		"""
+		Return a string representation of the matrix instance.
+
+		:returns: The trigger job's name with the instance's values, as GitLab prints it.
+		"""
+		return _matrixInstanceName(self._name, self._dimensions)
+
+	@classmethod
+	def Parse(
+		cls,
+		bridge:     JSONObject,
+		payload:    Nullable[JSONObject]        = None,
+		path:       str                         = "bridge",
+		name:       Nullable[str]               = None,
+		dimensions: Nullable[Mapping[str, Any]] = None,
+		*,
+		parent:     Nullable[CIMatrix]          = None
+	) -> Self:
+		"""
+		Build a matrix instance of a trigger job from the JSON objects the GitLab REST API answers with.
+
+		:param bridge:       The trigger job, as listed by ``GET /projects/{id}/pipelines/{pipeline_id}/bridges``.
+		:param payload:      Optional, the downstream pipeline's payloads, as for :meth:`DownstreamPipeline.Parse`.
+		                     Default: ``None``.
+		:param path:         Optional, position of the trigger job, for an exception's message. Default: ``'bridge'``.
+		:param name:         Optional, the trigger job's name without the instance's values. Default: read from the payload.
+		:param dimensions:   Optional, the dimensions' names and values. Default: read from the payload.
+		:param parent:       Optional, reference to the matrix containing the instance. Default: ``None``.
+		:returns:            The matrix instance, with its contents attached.
+		:raises TypeError:   If parameter 'bridge' is not of type :class:`dict`.
+		:raises TypeError:   If parameter 'payload' is not of type :class:`dict`.
+		:raises GitLabError: If field ``name`` is missing.
+		:raises GitLabError: If a field holds a value GitLab doesn't document.
+		"""
+		fields = cls._ParseFields(bridge, cls._CheckPayload(payload, path), path)
+		if name is None:
+			name, dimensions = _splitMatrixJobName(fields["name"])
+
+		fields["name"] = name
+		result = cls(**fields, dimensions=dimensions, parent=parent)
+		result._AddContents(payload, path)
+
+		return result
