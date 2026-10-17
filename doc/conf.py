@@ -182,6 +182,7 @@ extensions = [
 	"autoapi.sphinx",
 # User defined extensions
 	"pyTooling.Sphinx",
+	"pyTooling.GitLab.Sphinx",
 ]
 
 
