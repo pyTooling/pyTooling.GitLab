@@ -24,7 +24,7 @@ the extra ``sphinx``: ``pyTooling.GitLab[sphinx]``.
 The domain's directives are described on this page's siblings:
 
 :ref:`GLCI/Pipeline`
-  |rarr| ``glci:pipeline`` and the roles referring to it.
+  |rarr| ``glci:pipeline`` and the entries of its inputs and variables, and the roles referring to them.
 
 .. contents:: Contents of this page
    :local:
@@ -85,8 +85,12 @@ refers to an entry as it refers to any section:
 .. code-block:: text
 
    PIPELINE/Package                          .. glci:pipeline:: Package
+   PIPELINE/Package/Input/package_name       .. glci:input:: package_name
+   PIPELINE/Package/Variable/DEPLOY_ENV      .. glci:variable:: DEPLOY_ENV
 
-A label still declared by hand next to the directive is a duplicate.
+A parameter's section carries the anchor of its label, and the anchor docutils derives from its title, so a link into a
+hand-written page converted to the domain lands on the same entry. A label still declared by hand next to the directive
+is a duplicate.
 
 
 .. _GLCI/Warnings:
@@ -94,8 +98,17 @@ A label still declared by hand next to the directive is a duplicate.
 Warnings
 ********
 
+The page and the pipeline file are compared while the page is read. A difference is a warning of type ``glci.drift``,
+so ``-W`` fails the build, and ``suppress_warnings = ["glci.drift"]`` silences it.
+
+* A ``glci:input`` or ``glci:variable`` names a parameter the pipeline file doesn't have.
+* A hand-written field repeats a fact of the pipeline file - *Type*, *Required* or *Default Value* of an input, and
+  *Possible Values* or *Pattern* of an input stating ``options`` or ``regex``; *Type* and *Default Value* of a
+  variable, and its *Possible Values* if it states ``options``. It is not shown; the file's value is.
+
 A pipeline file that can't be found or read is a warning of type ``glci.pipeline`` at the place in the file, as
-``Package.yml:8``. A pipeline documented twice is a warning of type ``glci.duplicate``.
+``Package.yml:8``, as is a ``glci:input`` or ``glci:variable`` without a preceding ``glci:pipeline``. A pipeline
+documented twice is a warning of type ``glci.duplicate``.
 
 
 .. _GLCI/API:
@@ -111,7 +124,9 @@ A directive of another module reaches the domain with ``self.env.get_domain("glc
 * :meth:`~pyTooling.GitLab.Sphinx.GitLabCIDomain.LoadPipelineFile` reads a pipeline file, every file once;
 * :attr:`~pyTooling.GitLab.Sphinx.GitLabCIDomain.Resolver` reads local includes and child pipeline files from
   :confval:`glci_repository_root`;
-* :meth:`~pyTooling.GitLab.Sphinx.GitLabCIDomain.ResolvePipeline` says where a pipeline is documented.
+* :meth:`~pyTooling.GitLab.Sphinx.GitLabCIDomain.ResolvePipeline` says where a pipeline is documented;
+* :meth:`ParameterDirective.CreateEntry <pyTooling.GitLab.Sphinx.ParameterDirective.CreateEntry>` creates a parameter's
+  entry and registers it.
 
 A directive is added to the domain with
 :meth:`Sphinx.add_directive_to_domain <sphinx.application.Sphinx.add_directive_to_domain>`.

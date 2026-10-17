@@ -31,7 +31,9 @@
 """
 A Sphinx domain ``glci`` documenting GitLab CI/CD pipeline files from their YAML files.
 
-A pipeline file is read by :mod:`pyTooling.GitLab.PipelineFile` and registered as the current pipeline of a document:
+The facts of a pipeline file's parameters - an input's type, whether it is required, its default, its options - are
+read from the file by :mod:`pyTooling.GitLab.PipelineFile`, so a page states them without copying them. What the file
+can't say stays hand-written, as the content of a directive:
 
 .. code-block:: rst
 
@@ -41,16 +43,23 @@ A pipeline file is read by :mod:`pyTooling.GitLab.PipelineFile` and registered a
    Package
    #######
 
+   .. glci:input:: package_name
+
+      :Example: ``myPackage``
+
 .. rubric:: What it registers
 
 * Directives
 
   * ``glci:pipeline``
+  * ``glci:input``
+  * ``glci:variable``
 
 * Roles
 
   * ``:glci:pipeline:``
-  * ``:glci:input:`` and ``:glci:variable:``, for the entries of parameters
+  * ``:glci:input:``
+  * ``:glci:variable:``
 
 * Configuration values, as listed in :attr:`GitLabCIDomain.configValues`
 
@@ -71,7 +80,7 @@ The pipeline files are read with ``ruamel.yaml`` when a directive runs, not when
 from __future__                      import annotations
 
 from pathlib                         import Path
-from typing                          import TYPE_CHECKING, Any, ClassVar, Iterable, Optional as Nullable
+from typing                          import TYPE_CHECKING, Any, ClassVar, Iterable, Optional as Nullable, Union
 
 from docutils                        import nodes
 from docutils.nodes                  import Element, Node, fully_normalize_name
@@ -90,20 +99,52 @@ from pyTooling.Decorators            import export, readonly
 from pyTooling.Sphinx                import BaseDirective
 
 if TYPE_CHECKING:  # pragma: no cover
-	from pyTooling.GitLab.PipelineFile import IncludeResolver, PipelineFile
+	from pyTooling.GitLab.PipelineFile import IncludeResolver, Input, PipelineFile, ValueT, Variable
 
 
-__all__ = ["WARNING_TYPE", "FILE_SUFFIXES"]
+__all__ = ["NO_DEFAULT", "WARNING_TYPE", "LEADING_FIELDS", "FILE_SUFFIXES"]
+
+#: The text of the field *Default Value* when a parameter has no default.
+NO_DEFAULT = "— — — —"
 
 #: The type of the warnings this domain emits; the drift warnings have the subtype ``drift``, so
 #: ``suppress_warnings = ["glci.drift"]`` silences them.
 WARNING_TYPE = "glci"
+
+#: The fields a *Description* taken from the pipeline file follows.
+LEADING_FIELDS = ("Type", "Required", "Default Value", "Possible Values", "Pattern")
 
 #: The file names a ``glci:pipeline`` without ``:file:`` tries in ``glci_pipeline_directory``, in this order; ``{name}``
 #: is the pipeline's name. The last is a CI/CD component's layout.
 FILE_SUFFIXES = ("{name}.yml", "{name}.yaml", "{name}/template.yml", "{name}/template.yaml")
 
 _logger = getLogger(__name__)
+
+
+@export
+def formatValue(value: ValueT) -> str:
+	"""
+	Format a value read from a pipeline file the way the file writes it.
+
+	A string is quoted as YAML quotes it - ``'3.14'`` -, a boolean is ``true`` or ``false``, a number is written as it is,
+	and a list is written in YAML's flow style - ``['a', 'b']``.
+
+	:param value: The value, as :attr:`Input.Default <pyTooling.GitLab.PipelineFile.Input.Default>`.
+	:returns:     The value as text, or :data:`NO_DEFAULT` for ``None``.
+	"""
+	if value is None:
+		return NO_DEFAULT
+	elif isinstance(value, bool):
+		return "true" if value else "false"
+	elif isinstance(value, str):
+		escaped = value.replace("'", "''")
+		return f"'{escaped}'"
+	elif isinstance(value, list):
+		return f"[{', '.join(formatValue(item) for item in value)}]"
+	elif isinstance(value, dict):
+		return f"{{{', '.join(f'{key}: {formatValue(item)}' for key, item in value.items())}}}"
+
+	return str(value)
 
 
 @export
@@ -206,6 +247,281 @@ class PipelineDirective(BaseDirective):
 
 
 @export
+class ParameterDirective(BaseDirective):
+	"""
+	Base-class of the directives documenting one parameter of the current pipeline.
+
+	The entry is a section titled by the parameter's name, holding a field list: first the fields read from the pipeline
+	file (:meth:`_FactFields`), then the fields of the directive's content, in the order written. Without a hand-written
+	*Description*, the pipeline file's ``description`` is used, placed behind the :data:`LEADING_FIELDS`. Content after
+	the field list follows it.
+
+	A hand-written field repeating a fact of the file is a warning, and the file's value is shown.
+
+	Besides its anchor ``glci-<type>-<Pipeline>.<name>``, the section carries the anchor of its label and - unless the
+	document uses it already - the anchor docutils derives from a title, as a hand-written section has.
+	"""
+
+	OBJECT_TYPE: ClassVar[str]              #: The domain's object type, as ``input``.
+	LABEL_KIND:  ClassVar[str]              #: The kind in a label, as ``Input`` in ``PIPELINE/Package/Input/name``.
+	COLLECTION:  ClassVar[str]              #: The pipeline file's property holding the parameters, as ``Inputs``.
+	FACT_FIELDS: ClassVar[tuple[str, ...]]  #: The fields the pipeline file may state.
+
+	has_content =        True  #: The hand-written fields and text.
+	required_arguments = 1     #: The parameter's name.
+
+	def run(self) -> list[Node]:
+		"""
+		Create the parameter's entry and register it.
+
+		:returns: An index node and the entry's section, or nothing outside a ``glci:pipeline``.
+		"""
+		name = self.arguments[0].strip()
+		if (pipelineName := self.env.ref_context.get("glci:pipeline", None)) is None:
+			_logger.warning(
+				f"{self.directiveName} '{name}' is not preceded by a glci:pipeline.",
+				location=self.get_location(), type=WARNING_TYPE, subtype="pipeline"
+			)
+			return []
+
+		domain: GitLabCIDomain = self.env.get_domain("glci")
+		parameter = None
+		if (pipelineFile := domain.GetCurrentPipeline()) is not None:
+			if (parameter := getattr(pipelineFile, self.COLLECTION).get(name, None)) is None:
+				_logger.warning(
+					f"Pipeline '{pipelineName}' has no {self.OBJECT_TYPE} '{name}' ({pipelineFile.Path.name}).",
+					location=self.get_location(), type=WARNING_TYPE, subtype="drift"
+				)
+
+		facts = self.FACT_FIELDS if parameter is None else [field[0].astext() for field in self._FactFields(parameter)]
+
+		content = self.parse_content_to_nodes()
+		handwritten = []
+		if len(content) > 0 and isinstance(content[0], nodes.field_list):
+			handwritten = list(content[0].children)
+			content = content[1:]
+
+		fields = []
+		for field in handwritten:
+			fieldName = field[0].astext().strip()
+			if fieldName in facts:
+				_logger.warning(
+					f"{self.directiveName} '{pipelineName}.{name}': field '{fieldName}' is taken from the pipeline file; "
+					"remove it.",
+					location=field, type=WARNING_TYPE, subtype="drift"
+				)
+				if parameter is not None:
+					continue
+
+			fields.append(field)
+
+		source, line = self.get_source_info()
+		return self.CreateEntry(self.env, self.state.document, pipelineName, name, parameter, fields, content, source, line)
+
+	@classmethod
+	def CreateEntry(
+		cls,
+		env:          BuildEnvironment,
+		document:     nodes.document,
+		pipelineName: str,
+		name:         str,
+		parameter:    Nullable[Union[Input, Variable]],
+		fields:       list[nodes.field],
+		content:      list[Node],
+		source:       str,
+		line:         Nullable[int]
+	) -> list[Node]:
+		"""
+		Create a parameter's entry and register it in the domain.
+
+		:param env:          The build environment.
+		:param document:     The document the entry is placed in.
+		:param pipelineName: The pipeline's name.
+		:param name:         The parameter's name.
+		:param parameter:    The parameter, as read from the pipeline file, or ``None`` if the pipeline file wasn't read or
+		                     hasn't this parameter.
+		:param fields:       The hand-written fields, without those repeating a fact of the pipeline file.
+		:param content:      The nodes following the field list.
+		:param source:       The source file the entry is reported at.
+		:param line:         The line the entry is reported at, or ``None``.
+		:returns:            An index node and the entry's section.
+		"""
+		fullName = f"{pipelineName}.{name}"
+		nodeID = make_id(env, document, f"glci-{cls.OBJECT_TYPE}", fullName)
+		section = nodes.section("", nodes.title(name, name), ids=[nodeID])
+		if (titleID := nodes.make_id(name)) not in document.ids:
+			section["ids"].append(titleID)
+
+		# The label's anchor comes last: docutils links a name to a node's last anchor, so a link keeps its target.
+		if (prefix := env.config.glci_label_prefix) is not None:
+			label = f"{prefix}/{pipelineName}/{cls.LABEL_KIND}/{name}"
+			section["ids"].append(nodes.make_id(label))
+			section["names"].append(fully_normalize_name(label))
+
+		section.source = source
+		section.line = line
+		document.note_explicit_target(section)
+
+		if parameter is not None:
+			fields = [*cls._FactFields(parameter), *fields]
+
+		fieldNames = [field[0].astext().strip() for field in fields]
+		if "Description" not in fieldNames and parameter is not None and parameter.Description:
+			leading = [index + 1 for index, fieldName in enumerate(fieldNames) if fieldName in LEADING_FIELDS]
+			position = max(leading, default=0)
+			fields.insert(position, cls._TextField("Description", parameter.Description.strip()))
+
+		if len(fields) > 0:
+			section += nodes.field_list("", *fields)
+		section.extend(content)
+
+		domain: GitLabCIDomain = env.get_domain("glci")
+		domain.NoteObject(cls.OBJECT_TYPE, fullName, nodeID, section)
+		return [
+			addnodes.index(entries=[("single", f"{name} ({cls.OBJECT_TYPE} of {pipelineName})", nodeID, "", None)]),
+			section
+		]
+
+	@staticmethod
+	def _Field(name: str, *body: Node) -> nodes.field:
+		"""
+		Create a field of a field list.
+
+		:param name: Name of the field, as ``Type``.
+		:param body: The nodes of the field's body.
+		:returns:    The field.
+		"""
+		return nodes.field("", nodes.field_name(name, name), nodes.field_body("", *body))
+
+	@classmethod
+	def _TextField(cls, name: str, text: str) -> nodes.field:
+		"""
+		Create a field of a field list, whose body is a line of text.
+
+		:param name: Name of the field, as ``Required``.
+		:param text: Text of the field's body.
+		:returns:    The field.
+		"""
+		return cls._Field(name, nodes.paragraph(text, text))
+
+	@classmethod
+	def _LiteralField(cls, name: str, texts: Iterable[str]) -> nodes.field:
+		"""
+		Create a field of a field list, whose body is a line of literals separated by commas.
+
+		:param name:  Name of the field, as ``Possible Values``.
+		:param texts: The literals' texts.
+		:returns:     The field.
+		"""
+		paragraph = nodes.paragraph()
+		for index, text in enumerate(texts):
+			if index > 0:
+				paragraph += nodes.Text(", ")
+			paragraph += nodes.literal(text, text)
+
+		return cls._Field(name, paragraph)
+
+	@classmethod
+	def _DefaultField(cls, value: ValueT) -> nodes.field:
+		"""
+		Create the field *Default Value*.
+
+		A multi-line string becomes a literal block, keeping its line breaks; no default becomes :data:`NO_DEFAULT`.
+
+		:param value: The default value.
+		:returns:     The field.
+		"""
+		if value is None:
+			return cls._TextField("Default Value", NO_DEFAULT)
+		elif isinstance(value, str) and "\n" in value:
+			return cls._Field("Default Value", nodes.literal_block(value, value, language="text"))
+
+		return cls._LiteralField("Default Value", (formatValue(value), ))
+
+	@classmethod
+	def _FactFields(cls, parameter: Union[Input, Variable]) -> list[nodes.field]:
+		"""
+		Create the fields taken from the pipeline file.
+
+		:param parameter: The parameter, as read from the pipeline file.
+		:returns:         The fields the file states for this parameter, in the order of :attr:`FACT_FIELDS`.
+		"""
+		return []
+
+
+@export
+class InputDirective(ParameterDirective):
+	"""
+	The directive ``glci:input``: an input of the current pipeline file's ``spec:inputs``.
+
+	The fields *Type*, *Required* and *Default Value* are taken from the pipeline file, and - where the file states them -
+	*Possible Values* (``options``) and *Pattern* (``regex``).
+	"""
+
+	directiveName: str = "glci:input"  #: Name the directive is invoked by.
+
+	OBJECT_TYPE = "input"   #: The domain's object type.
+	LABEL_KIND =  "Input"   #: The kind in a label.
+	COLLECTION =  "Inputs"  #: The pipeline file's property holding the parameters.
+
+	#: The fields the file may state.
+	FACT_FIELDS = ("Type", "Required", "Default Value", "Possible Values", "Pattern")
+
+	@classmethod
+	def _FactFields(cls, parameter: Input) -> list[nodes.field]:
+		"""
+		Create the fields *Type*, *Required*, *Default Value*, and *Possible Values* and *Pattern* if the input has them.
+
+		:param parameter: The input, as read from the pipeline file.
+		:returns:         The fields.
+		"""
+		fields = [
+			cls._TextField("Type", parameter.Type.value),
+			cls._TextField("Required", "yes" if parameter.Required else "no"),
+			cls._DefaultField(parameter.Default)
+		]
+		if len(parameter.Options) > 0:
+			fields.append(cls._LiteralField("Possible Values", (formatValue(option) for option in parameter.Options)))
+
+		if parameter.Regex is not None:
+			fields.append(cls._LiteralField("Pattern", (parameter.Regex, )))
+
+		return fields
+
+
+@export
+class VariableDirective(ParameterDirective):
+	"""
+	The directive ``glci:variable``: a default variable of the current pipeline file, declared in its ``variables``.
+
+	The fields *Type* - a variable is a string -, *Default Value* (``value``) and - where the file states them - *Possible
+	Values* (``options``) are taken from the pipeline file. A variable with a ``description`` is prefilled in the form
+	running a pipeline by hand.
+	"""
+
+	directiveName: str = "glci:variable"  #: Name the directive is invoked by.
+
+	OBJECT_TYPE = "variable"                                    #: The domain's object type.
+	LABEL_KIND =  "Variable"                                    #: The kind in a label.
+	COLLECTION =  "Variables"                                   #: The pipeline file's property holding the parameters.
+	FACT_FIELDS = ("Type", "Default Value", "Possible Values")  #: The fields the file may state.
+
+	@classmethod
+	def _FactFields(cls, parameter: Variable) -> list[nodes.field]:
+		"""
+		Create the fields *Type* and *Default Value*, and *Possible Values* if the variable has options.
+
+		:param parameter: The variable, as read from the pipeline file.
+		:returns:         The fields.
+		"""
+		fields = [cls._TextField("Type", "string"), cls._DefaultField(parameter.Value)]
+		if len(parameter.Options) > 0:
+			fields.append(cls._LiteralField("Possible Values", (formatValue(option) for option in parameter.Options)))
+
+		return fields
+
+
+@export
 class GitLabCIXRefRole(XRefRole):
 	"""
 	The roles ``:glci:pipeline:``, ``:glci:input:`` and ``:glci:variable:``.
@@ -262,6 +578,8 @@ class GitLabCIDomain(Domain):
 
 	directives: ClassVar[dict[str, type]] = {  # type: ignore[misc]
 		"pipeline": PipelineDirective,
+		"input":    InputDirective,
+		"variable": VariableDirective,
 	}  #: The directives, by name.
 
 	roles: ClassVar[dict[str, XRefRole]] = {  # type: ignore[misc]

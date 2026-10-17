@@ -51,9 +51,10 @@ from pyTooling.Testing import Testcase, testsuite, testcase
 sphinxIsSupported = version_info >= (3, 12)
 
 if sphinxIsSupported:
-	from sphinx.testing.util import SphinxTestApp
-	from sphinx.util.console import strip_colors
+	from sphinx.testing.util     import SphinxTestApp
+	from sphinx.util.console     import strip_colors
 
+	from pyTooling.GitLab.Sphinx import NO_DEFAULT, formatValue
 
 
 if __name__ == "__main__":  # pragma: no cover
@@ -503,3 +504,327 @@ class Builds(Project):
 			self._WarningLines()
 		)
 
+
+PARAMETERS = dedent("""\
+	Inputs
+	******
+
+	.. glci:input:: package_name
+
+	   :Example: ``myPackage``
+
+	.. glci:input:: python_version
+
+	   :Description: Python version used by jobs needing one.
+
+	.. glci:input:: dry_run
+
+	.. glci:input:: pages_on
+
+	.. glci:input:: level
+
+	.. glci:input:: tag
+
+	Variables
+	*********
+
+	.. glci:variable:: DEPLOY_ENV
+
+	.. glci:variable:: PLAIN
+
+	   :Description: A plain variable.
+""")
+"""The parameter entries of the pipeline 'Package'."""
+
+
+@testsuite("Parameters")
+class Parameters(Project):
+	"""The directives 'glci:input' and 'glci:variable'."""
+
+	@testcase("Input")
+	def Input(self) -> None:
+		"""
+		An input's entry holds the facts of the file, then the hand-written fields, with the file's description behind the
+		facts.
+
+		Builds the entry of 'package_name' and checks its fields, values and anchors.
+		"""
+		self._Pipeline("Package", PIPELINE)
+		self._Build({"Package": PAGE + PARAMETERS})
+
+		self.assertEqual([], self._WarningLines())
+		html = self._HTML("Package")
+		start = html.index('id="glci-input-Package.package_name"')
+		entry = html[start:html.index('id="glci-input-Package.python_version"')]
+		fields = [part.split("<")[0].split(">")[1] for part in entry.split('<dt class="field-')[1:]]
+		self.assertEqual(["Type", "Required", "Default Value", "Description", "Example"], fields)
+		self.assertIn("<p>string</p>", entry)
+		self.assertIn("<p>yes</p>", entry)
+		self.assertIn(f"<p>{NO_DEFAULT}</p>", entry)
+		self.assertIn("<p>Name of the package.</p>", entry)
+		self.assertIn('id="pipeline-package-input-package-name"', entry)
+		self.assertIn('id="package-name"', entry)
+
+	@testcase("Defaults")
+	def Defaults(self) -> None:
+		"""
+		A default is written as YAML writes it; a multi-line default as a block.
+
+		Builds the inputs with a string, a boolean and a multi-line default.
+		"""
+		self._Pipeline("Package", PIPELINE)
+		self._Build({"Package": PAGE + PARAMETERS})
+
+		html = self._HTML("Package")
+		self.assertIn("<span class=\"pre\">'3.14'</span>", html)
+		self.assertIn("<span class=\"pre\">false</span>", html)
+		self.assertIn("default-branch\nrelease-tag", html)
+
+	@testcase("Options and pattern")
+	def OptionsAndPattern(self) -> None:
+		"""
+		An input's options are its *Possible Values*, its regex its *Pattern*.
+
+		Builds the inputs 'level' and 'tag'.
+		"""
+		self._Pipeline("Package", PIPELINE)
+		self._Build({"Package": PAGE + PARAMETERS})
+
+		html = self._HTML("Package")
+		level = html[html.index('id="glci-input-Package.level"'):html.index('id="glci-input-Package.tag"')]
+		self.assertIn(">Possible Values<", level)
+		self.assertIn("<span class=\"pre\">'debug'</span>", level)
+		tag = html[html.index('id="glci-input-Package.tag"'):html.index('id="variables"')]
+		self.assertIn(">Pattern<", tag)
+		self.assertIn("<span class=\"pre\">^v[0-9]+$</span>", tag)
+
+	@testcase("Hand-written description")
+	def Description(self) -> None:
+		"""
+		A hand-written description wins over the file's.
+
+		Builds the input 'python_version', which has both.
+		"""
+		self._Pipeline("Package", PIPELINE)
+		self._Build({"Package": PAGE + PARAMETERS})
+
+		html = self._HTML("Package")
+		self.assertIn("<p>Python version used by jobs needing one.</p>", html)
+		self.assertNotIn("<p>Python version.</p>", html)
+
+	@testcase("Variable")
+	def Variable(self) -> None:
+		"""
+		A variable's entry holds its type - a string -, value and options, and its description.
+
+		Builds the variables 'DEPLOY_ENV' and 'PLAIN'.
+		"""
+		self._Pipeline("Package", PIPELINE)
+		self._Build({"Package": PAGE + PARAMETERS})
+
+		html = self._HTML("Package")
+		entry = html[html.index('id="glci-variable-Package.DEPLOY_ENV"'):html.index('id="glci-variable-Package.PLAIN"')]
+		fields = [part.split("<")[0].split(">")[1] for part in entry.split('<dt class="field-')[1:]]
+		self.assertEqual(["Type", "Default Value", "Possible Values", "Description"], fields)
+		self.assertIn("<p>string</p>", entry)
+		self.assertIn("<span class=\"pre\">'production'</span>", entry)
+		self.assertIn("<p>Where to deploy.</p>", entry)
+		self.assertIn("<p>A plain variable.</p>", html)
+
+	@testcase("Fact field written by hand")
+	def FactField(self) -> None:
+		"""
+		A hand-written field repeating a fact of the file is a warning, and the file's value is shown.
+
+		Builds 'package_name' with a hand-written *Type*.
+		"""
+		self._Pipeline("Package", PIPELINE)
+		page = PAGE + PARAMETERS.replace("   :Example: ``myPackage``", "   :Type:    number\n   :Example: ``myPackage``")
+		self._Build({"Package": page})
+
+		self.assertEqual(
+			[
+				"src/Package.rst:10: WARNING: glci:input 'Package.package_name': field 'Type' is taken from the pipeline "
+				"file; remove it. [glci.drift]"
+			],
+			self._WarningLines()
+		)
+		self.assertNotIn("<p>number</p>", self._HTML("Package"))
+
+	@testcase("Possible Values without options")
+	def PossibleValues(self) -> None:
+		"""
+		*Possible Values* may be written by hand for an input without options.
+
+		Builds 'package_name' with hand-written *Possible Values*.
+		"""
+		self._Pipeline("Package", PIPELINE)
+		page = PAGE + PARAMETERS.replace("   :Example: ``myPackage``", "   :Possible Values: Any package name.")
+		self._Build({"Package": page})
+
+		self.assertEqual([], self._WarningLines())
+		self.assertIn("<p>Any package name.</p>", self._HTML("Package"))
+
+	@testcase("Unknown parameter")
+	def Unknown(self) -> None:
+		"""
+		An entry of a parameter the file doesn't have is a warning.
+
+		Builds an entry of the input 'unknown'.
+		"""
+		self._Pipeline("Package", PIPELINE)
+		self._Build({"Package": PAGE + "\n.. glci:input:: unknown\n"})
+
+		self.assertEqual(
+			["src/Package.rst:6: WARNING: Pipeline 'Package' has no input 'unknown' (Package.yml). [glci.drift]"],
+			self._WarningLines()
+		)
+
+	@testcase("Outside a pipeline")
+	def OutsidePipeline(self) -> None:
+		"""
+		An entry without a preceding 'glci:pipeline' is a warning, and creates nothing.
+
+		Builds a page with only a 'glci:input'.
+		"""
+		self._Build({"Package": "Package\n#######\n\n.. glci:input:: package_name\n"})
+
+		self.assertEqual(
+			["src/Package.rst:4: WARNING: glci:input 'package_name' is not preceded by a glci:pipeline. [glci.pipeline]"],
+			self._WarningLines()
+		)
+
+
+@testsuite("Parameter references")
+class References(Project):
+	"""The roles ':glci:input:' and ':glci:variable:'."""
+
+	PAGE = PAGE + PARAMETERS + dedent("""\
+
+		See :glci:input:`package_name`, :glci:input:`~Package.python_version`, :glci:variable:`DEPLOY_ENV` and
+		:ref:`PIPELINE/Package/Input/dry_run`.
+	""")
+	"""The page 'Package', referring to its own parameters."""
+
+	@testcase("In the pipeline's document")
+	def InPipeline(self) -> None:
+		"""
+		A parameter's name alone refers to the current pipeline's parameter; '~' shortens the title.
+
+		Builds the page referring to its parameters.
+		"""
+		self._Pipeline("Package", PIPELINE)
+		self._Build({"Package": self.PAGE})
+
+		html = self._HTML("Package")
+		self.assertEqual([], self._WarningLines())
+		self.assertIn('href="#glci-input-Package.package_name"', html)
+		self.assertIn(
+			'title="Package.python_version"><code class="xref glci glci-input docutils literal notranslate">'
+			'<span class="pre">python_version</span>',
+			html
+		)
+		self.assertIn('href="#glci-variable-Package.DEPLOY_ENV"', html)
+		self.assertIn('href="#pipeline-package-input-dry-run"><span class="std std-ref">dry_run</span>', html)
+
+	@testcase("From another document")
+	def OtherDocument(self) -> None:
+		"""
+		From another document, a parameter is named with its pipeline; ':any:' finds it too.
+
+		Builds an index page referring to a parameter of 'Package'.
+		"""
+		self._Pipeline("Package", PIPELINE)
+		index = "Index\n#####\n\n:glci:input:`Package.package_name` and :any:`Package.DEPLOY_ENV`\n"
+		self._Build({"Package": PAGE + PARAMETERS, "index": index})
+
+		html = self._HTML("index")
+		self.assertEqual([], self._WarningLines())
+		self.assertIn('href="Package.html#glci-input-Package.package_name"', html)
+		self.assertIn('href="Package.html#glci-variable-Package.DEPLOY_ENV"', html)
+
+	@testcase("Unresolved")
+	def Unresolved(self) -> None:
+		"""
+		A parameter's name alone outside its pipeline's document doesn't resolve, which is a warning.
+
+		Builds an index page naming 'package_name' without its pipeline.
+		"""
+		self._Pipeline("Package", PIPELINE)
+		self._Build({"Package": PAGE + PARAMETERS, "index": "Index\n#####\n\n:glci:input:`package_name`\n"})
+
+		self.assertEqual(
+			["src/index.rst:4: WARNING: glci:input reference target not found: package_name [ref.input]"],
+			self._WarningLines()
+		)
+
+	@testcase("Pipeline file changed")
+	def FileChanged(self) -> None:
+		"""
+		A document is read again when its pipeline file changed.
+
+		Builds the page, changes a default in the file and builds again without discarding the environment.
+		"""
+		self._Pipeline("Package", PIPELINE)
+		self._Build({"Package": PAGE + PARAMETERS})
+
+		self._Pipeline("Package", PIPELINE.replace("default: '3.14'", "default: '3.15'"))
+		self._Build({"Package": PAGE + PARAMETERS}, fresh=False)
+
+		self.assertIn("'3.15'", self._HTML("Package"))
+
+
+@mark.skipif(not sphinxIsSupported, reason="Sphinx 9.1 needs Python 3.12 or newer.")
+@testsuite("Values")
+class Values(Testcase):
+	"""Values of a pipeline file, written as YAML writes them."""
+
+	@testcase("Strings")
+	def String(self) -> None:
+		"""
+		A string is quoted with single quotes, which are doubled inside.
+
+		Formats three strings.
+		"""
+		self.assertEqual("'3.14'", formatValue("3.14"))
+		self.assertEqual("''", formatValue(""))
+		self.assertEqual("'tool''s'", formatValue("tool's"))
+
+	@testcase("Booleans")
+	def Boolean(self) -> None:
+		"""
+		A boolean is 'true' or 'false'.
+
+		Formats both.
+		"""
+		self.assertEqual("true", formatValue(True))
+		self.assertEqual("false", formatValue(False))
+
+	@testcase("Numbers")
+	def Number(self) -> None:
+		"""
+		A number is written as it is.
+
+		Formats an integer and a float.
+		"""
+		self.assertEqual("0", formatValue(0))
+		self.assertEqual("1.5", formatValue(1.5))
+
+	@testcase("Lists and mappings")
+	def Collections(self) -> None:
+		"""
+		A list and a mapping are written in YAML's flow style.
+
+		Formats a list of strings and a mapping.
+		"""
+		self.assertEqual("['a', 'b']", formatValue(["a", "b"]))
+		self.assertEqual("{key: 1}", formatValue({"key": 1}))
+
+	@testcase("No value")
+	def NoValue(self) -> None:
+		"""
+		``None`` is :data:`NO_DEFAULT`.
+
+		Formats ``None``.
+		"""
+		self.assertEqual(NO_DEFAULT, formatValue(None))
