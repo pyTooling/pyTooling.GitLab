@@ -29,14 +29,14 @@
 # ==================================================================================================================== #
 """
 Unit tests for :mod:`pyTooling.GitLab.PipelineFile`: the configuration file, its stages, variables,
-jobs, needs, rules and workflow.
+jobs, needs, rules, workflow, includes and default.
 """
 from pathlib                       import Path
 from tempfile                      import TemporaryDirectory
 from textwrap                      import dedent
 
 from pyTooling.GitLab.PipelineFile import DEFAULT_STAGES, Job, Need, NeedKind, PipelineFile, PipelineFileError
-from pyTooling.GitLab.PipelineFile import Rule, Variable, When, Workflow
+from pyTooling.GitLab.PipelineFile import Default, Include, IncludeKind, Rule, Variable, When, Workflow
 from pyTooling.Testing             import Testcase, testsuite, testcase
 
 
@@ -1173,7 +1173,7 @@ class RuleParameters(Testcase):
 
 		with self.assertRaises(TypeError) as context:
 			Rule(1, parent=PipelineFile(Path(".gitlab-ci.yml")))
-		self.assertEqual("Parameter 'parent' is not of type 'Job' or 'Workflow'.", str(context.exception))
+		self.assertEqual("Parameter 'parent' is not of type 'Job' or 'Workflow' or 'Include'.", str(context.exception))
 
 	@testcase("Workflow")
 	def WorkflowChecks(self) -> None:
@@ -1253,3 +1253,250 @@ class RuleErrors(Fixture):
 		with self.assertRaises(PipelineFileError) as context:
 			PipelineFile.FromFile(self._Write("build:\n  rules:\n    - variables: [A]\n"))
 		self.assertEqual("Key 'variables' of a rule of job 'build' is not a mapping.", str(context.exception))
+
+
+@testsuite("Includes and default")
+class Includes(Fixture):
+	"""Reading the 'include' and 'default' keys, and constructing includes and defaults."""
+
+	@testcase("Kinds of includes")
+	def Kinds(self) -> None:
+		"""
+		A path is a local include, a URL a remote one; a mapping names its kind by its key.
+
+		Checks kind and location of every include.
+		"""
+		pipelineFile = PipelineFile.FromFile(DATA / "Includes.yml")
+		includes = pipelineFile.Includes
+
+		self.assertEqual(7, len(includes))
+		self.assertIs(IncludeKind.Local, includes[0].Kind)
+		self.assertEqual("/ci/build.yml", includes[0].Location)
+		self.assertIs(IncludeKind.Local, includes[1].Kind)
+		self.assertEqual("/ci/test.yml", includes[1].Location)
+		self.assertIs(IncludeKind.Remote, includes[2].Kind)
+		self.assertIs(IncludeKind.Project, includes[3].Kind)
+		self.assertIs(IncludeKind.Project, includes[4].Kind)
+		self.assertIs(IncludeKind.Template, includes[5].Kind)
+		self.assertEqual("Auto-DevOps.gitlab-ci.yml", includes[5].Location)
+		self.assertIs(IncludeKind.Component, includes[6].Kind)
+		self.assertEqual("component: $CI_SERVER_FQDN/group/components/lint@1.2", str(includes[6]))
+		for include in includes:
+			self.assertIs(pipelineFile, include.Parent)
+
+	@testcase("Another project's files")
+	def Project(self) -> None:
+		"""
+		An include of another project has the project's path, its files - a list or one - and a reference.
+
+		Checks the two includes of other projects.
+		"""
+		includes = PipelineFile.FromFile(DATA / "Includes.yml").Includes
+
+		self.assertEqual("group/shared", includes[3].Location)
+		self.assertEqual("v1.0", includes[3].Ref)
+		self.assertEqual(("/templates/a.yml", "/templates/b.yml"), includes[3].Files)
+		self.assertEqual(6, includes[3].Line)
+
+		self.assertEqual(("/templates/c.yml", ), includes[4].Files)
+		self.assertIsNone(includes[4].Ref)
+
+	@testcase("Inputs and rules of an include")
+	def InputsAndRules(self) -> None:
+		"""
+		An include passes inputs with the types they are written with, and has rules.
+
+		Checks the component's include.
+		"""
+		component = PipelineFile.FromFile(DATA / "Includes.yml").Includes[6]
+
+		self.assertEqual({"stage": "test", "strict": True}, component.Inputs)
+		self.assertEqual(1, len(component.Rules))
+		self.assertEqual('$LINT == "yes"', component.Rules[0].Condition)
+		self.assertIs(component, component.Rules[0].Parent)
+		self.assertEqual({}, PipelineFile.FromFile(DATA / "Includes.yml").Includes[0].Inputs)
+
+	@testcase("Default and global keywords")
+	def Default(self) -> None:
+		"""
+		'default' sets image, services, tags and scripts; a global keyword fills in what 'default' doesn't set.
+
+		Checks the default of the fixture.
+		"""
+		pipelineFile = PipelineFile.FromFile(DATA / "Includes.yml")
+		default = pipelineFile.Default
+
+		self.assertIs(pipelineFile, default.Parent)
+		self.assertEqual(21, default.Line)
+		self.assertEqual("python:3.14", default.Image)
+		self.assertEqual(("postgres:17", ), default.Services)
+		self.assertEqual(("linux", ), default.Tags)
+		self.assertEqual(('echo "default before"', ), default.BeforeScript)
+		self.assertEqual(('echo "global after"', ), default.AfterScript)
+
+	@testcase("Global keywords only")
+	def GlobalsOnly(self) -> None:
+		"""
+		Without 'default', the global keywords form the default, starting at the first one; without both, there's none.
+
+		Reads a file with global keywords, and one without.
+		"""
+		default = PipelineFile.FromFile(self._Write("variables: {}\nimage: alpine\nbefore_script: [echo]\n")).Default
+		self.assertEqual(2, default.Line)
+		self.assertEqual("alpine", default.Image)
+		self.assertEqual(("echo", ), default.BeforeScript)
+
+		self.assertIsNone(PipelineFile.FromFile(DATA / "Jobs.yml").Default)
+		self.assertEqual([], PipelineFile.FromFile(DATA / "Jobs.yml").Includes)
+
+	@testcase("Constructed")
+	def Constructed(self) -> None:
+		"""
+		An include and a default constructed with a file as parent are attached to it, and so are those passed to it.
+
+		Constructs includes and defaults both ways.
+		"""
+		pipelineFile = PipelineFile(Path(".gitlab-ci.yml"))
+		include = Include(IncludeKind.Local, "/ci/a.yml", 2, parent=pipelineFile)
+		default = Default(5, "alpine", parent=pipelineFile)
+		self.assertEqual([include], pipelineFile.Includes)
+		self.assertIs(default, pipelineFile.Default)
+
+		rule = Rule(4)
+		passedInclude = Include(IncludeKind.Template, "A.yml", 3, rules=[rule])
+		passedDefault = Default(6)
+		other = PipelineFile(Path("other.yml"), includes=[passedInclude], default=passedDefault)
+		self.assertIs(other, passedInclude.Parent)
+		self.assertIs(other, rule.PipelineFile)
+		self.assertIs(other, passedDefault.Parent)
+
+
+@testsuite("Parameter checks of includes and default")
+class IncludeParameters(Testcase):
+	"""The constructors of includes and defaults reject parameters of the wrong type or value."""
+
+	@testcase("Include")
+	def IncludeChecks(self) -> None:
+		"""
+		An include's kind is an IncludeKind, its location a non-empty string, its files strings.
+
+		Checks each exception.
+		"""
+		with self.assertRaises(ValueError) as context:
+			Include(None, "a", 1)
+		self.assertEqual("Parameter 'kind' is None.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Include("local", "a", 1)
+		self.assertEqual("Parameter 'kind' is not of type 'IncludeKind'.", str(context.exception))
+
+		with self.assertRaises(ValueError) as context:
+			Include(IncludeKind.Local, None, 1)
+		self.assertEqual("Parameter 'location' is None.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Include(IncludeKind.Local, 1, 1)
+		self.assertEqual("Parameter 'location' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(ValueError) as context:
+			Include(IncludeKind.Local, "", 1)
+		self.assertEqual("Parameter 'location' is empty.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Include(IncludeKind.Project, "g/p", 1, files=[1])
+		self.assertEqual("An element of parameter 'files' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Include(IncludeKind.Project, "g/p", 1, ref=1)
+		self.assertEqual("Parameter 'ref' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Include(IncludeKind.Local, "a", 1, rules=["$A"])
+		self.assertEqual("An element of parameter 'rules' is not of type 'Rule'.", str(context.exception))
+
+	@testcase("Default")
+	def DefaultChecks(self) -> None:
+		"""
+		A default's image is a string, its lists strings; a file's includes are Includes, its default a Default.
+
+		Checks each TypeError.
+		"""
+		with self.assertRaises(TypeError) as context:
+			Default(1, 1)
+		self.assertEqual("Parameter 'image' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Default(1, tags=[1])
+		self.assertEqual("An element of parameter 'tags' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			PipelineFile(Path(".gitlab-ci.yml"), includes=["/ci/a.yml"])
+		self.assertEqual("An element of parameter 'includes' is not of type 'Include'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			PipelineFile(Path(".gitlab-ci.yml"), default="alpine")
+		self.assertEqual("Parameter 'default' is not of type 'Default'.", str(context.exception))
+
+
+@testsuite("Malformed includes and default")
+class IncludeErrors(Fixture):
+	"""A malformed 'include' or 'default' raises PipelineFileError, naming file and line."""
+
+	@testcase("Malformed includes")
+	def MalformedIncludes(self) -> None:
+		"""
+		An include is a path or a mapping naming one kind; another project's include has files; inputs are a mapping.
+
+		Checks message, line and note of each error.
+		"""
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("include:\n  - [a]\n"))
+		self.assertEqual("Include is neither a path nor a mapping.", str(context.exception))
+		self.assertEqual(2, context.exception.Line)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("include:\n  - ref: main\n"))
+		self.assertEqual("Include has none of its kinds' keys.", str(context.exception))
+		self.assertIn("Kinds: local, project, remote, template, component.", context.exception.__notes__)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("include:\n  - local: a.yml\n    template: b.yml\n"))
+		self.assertEqual("Include has more than one of its kinds' keys.", str(context.exception))
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("include:\n  - project: g/p\n"))
+		self.assertEqual("Include of another project has no 'file' key.", str(context.exception))
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("include:\n  - project: g/p\n    file:\n      path: a.yml\n"))
+		self.assertEqual("Key 'file' of an include is neither a path nor a list.", str(context.exception))
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("include:\n  - local: a.yml\n    inputs: [a]\n"))
+		self.assertEqual("Key 'inputs' of an include is not a mapping.", str(context.exception))
+		self.assertEqual(3, context.exception.Line)
+
+	@testcase("Malformed default")
+	def MalformedDefault(self) -> None:
+		"""
+		'default' is a mapping, its 'services' and 'tags' lists, its scripts no mappings.
+
+		Checks message and line of each error.
+		"""
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("variables: {}\ndefault: alpine\n"))
+		self.assertEqual("Key 'default' is not a mapping.", str(context.exception))
+		self.assertEqual(2, context.exception.Line)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("default:\n  services: postgres\n"))
+		self.assertEqual("Key 'services' of the default is not a list.", str(context.exception))
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("default:\n  tags: linux\n"))
+		self.assertEqual("Key 'tags' of the default is not a list.", str(context.exception))
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("default:\n  before_script:\n    run: a\n"))
+		self.assertEqual("Key 'before_script' of the default is not a script.", str(context.exception))
+		self.assertEqual(2, context.exception.Line)

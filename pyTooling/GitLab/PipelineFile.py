@@ -38,6 +38,9 @@ read once into objects:
    - :class:`PipelineFile` | a configuration file, e.g. :file:`.gitlab-ci.yml`
      - :class:`Workflow`   | the ``workflow`` key
        - :class:`Rule`     | a rule deciding whether a pipeline is created
+     - :class:`Include`    | an entry of ``include``
+       - :class:`Rule`     | a rule deciding whether the file is included
+     - :class:`Default`    | the ``default`` key
      - :class:`Variable`   | a default variable, declared in the top-level ``variables``
      - :class:`Job`        | a job or a hidden job, in file order
        - :class:`Need`     | an entry of the job's ``needs``
@@ -146,6 +149,17 @@ class When(StringEnum):
 	Always =    "always"      #: Whatever the jobs of earlier stages did.
 	Manual =    "manual"      #: When started by hand.
 	Delayed =   "delayed"     #: After the time given by ``start_in``.
+
+
+@export
+class IncludeKind(StringEnum):
+	"""Where an included file comes from, as the key of an ``include`` entry names it."""
+
+	Local =     "local"      #: A file of the same repository.
+	Project =   "project"    #: Files of another project.
+	Remote =    "remote"     #: A file at a URL.
+	Template =  "template"   #: A CI/CD template shipped with GitLab.
+	Component = "component"  #: A CI/CD component.
 
 
 @export
@@ -348,6 +362,8 @@ class PipelineFile(Base[None]):
 	_jobs:       dict[str, Job]             #: Jobs, by name, in file order.
 	_hiddenJobs: dict[str, Job]             #: Hidden jobs, by name, in file order.
 	_workflow:   Nullable[Workflow]         #: The ``workflow`` key.
+	_includes:   list[Include]              #: Entries of ``include``, in file order.
+	_default:    Nullable[Default]          #: The ``default`` key.
 
 	def __init__(
 		self,
@@ -355,13 +371,15 @@ class PipelineFile(Base[None]):
 		stages:    Nullable[Iterable[str]]      = None,
 		variables: Nullable[Iterable[Variable]] = None,
 		jobs:      Nullable[Iterable[Job]]      = None,
-		workflow:  Nullable[Workflow]           = None
+		workflow:  Nullable[Workflow]           = None,
+		includes:  Nullable[Iterable[Include]]  = None,
+		default:   Nullable[Default]            = None
 	) -> None:
 		"""
 		Initializes a configuration file.
 
-		A variable, job or workflow is attached by passing it, or by constructing it with the configuration file as
-		parent. Use :meth:`FromFile` to read a configuration file.
+		A variable, job, workflow, include or default is attached by passing it, or by constructing it with the
+		configuration file as parent. Use :meth:`FromFile` to read a configuration file.
 
 		:param path:        Path to the configuration file.
 		:param stages:      Optional, stages as the ``stages`` key declares them. Default: ``None``, for a file without a
@@ -369,12 +387,16 @@ class PipelineFile(Base[None]):
 		:param variables:   Optional, default variables, which are attached to the file. Default: ``None``.
 		:param jobs:        Optional, jobs and hidden jobs, which are attached to the file. Default: ``None``.
 		:param workflow:    Optional, the ``workflow`` key, which is attached to the file. Default: ``None``.
+		:param includes:    Optional, entries of ``include``, which are attached to the file. Default: ``None``.
+		:param default:     Optional, the ``default`` key, which is attached to the file. Default: ``None``.
 		:raises ValueError: If parameter 'path' is ``None``.
 		:raises TypeError:  If parameter 'path' is not of type :class:`~pathlib.Path`.
 		:raises TypeError:  If an element of parameter 'stages' is not of type :class:`str`.
 		:raises TypeError:  If an element of parameter 'variables' is not of type :class:`Variable`.
 		:raises TypeError:  If an element of parameter 'jobs' is not of type :class:`Job`.
 		:raises TypeError:  If parameter 'workflow' is not of type :class:`Workflow`.
+		:raises TypeError:  If an element of parameter 'includes' is not of type :class:`Include`.
+		:raises TypeError:  If parameter 'default' is not of type :class:`Default`.
 		"""
 		super().__init__(1)
 
@@ -392,6 +414,8 @@ class PipelineFile(Base[None]):
 		self._jobs =         {}
 		self._hiddenJobs =   {}
 		self._workflow =     None
+		self._includes =     []
+		self._default =      None
 
 		if stages is not None:
 			self._stages = tuple(stages)
@@ -429,6 +453,25 @@ class PipelineFile(Base[None]):
 
 			self._workflow = workflow
 			workflow.Parent = self
+
+		if includes is not None:
+			for include in includes:
+				if not isinstance(include, Include):
+					ex = TypeError("An element of parameter 'includes' is not of type 'Include'.")
+					ex.add_note(f"Got type '{getFullyQualifiedName(include)}'.")
+					raise ex
+
+				self._includes.append(include)
+				include.Parent = self
+
+		if default is not None:
+			if not isinstance(default, Default):
+				ex = TypeError("Parameter 'default' is not of type 'Default'.")
+				ex.add_note(f"Got type '{getFullyQualifiedName(default)}'.")
+				raise ex
+
+			self._default = default
+			default.Parent = self
 
 	@Base.Parent.setter
 	def Parent(self, value: None) -> None:
@@ -502,6 +545,24 @@ class PipelineFile(Base[None]):
 		:returns: The workflow, or ``None`` if the file has no ``workflow`` key.
 		"""
 		return self._workflow
+
+	@readonly
+	def Includes(self) -> list[Include]:
+		"""
+		Read-only property to access the entries of ``include`` (:attr:`_includes`).
+
+		:returns: The entries, in file order.
+		"""
+		return self._includes
+
+	@readonly
+	def Default(self) -> Nullable[Default]:
+		"""
+		Read-only property to access the ``default`` key (:attr:`_default`).
+
+		:returns: The default, or ``None`` if the file has neither a ``default`` key nor a global keyword it stands for.
+		"""
+		return self._default
 
 	@readonly
 	def JobCount(self) -> int:
@@ -616,10 +677,12 @@ class PipelineFile(Base[None]):
 
 		:param document:           The configuration, a mapping.
 		:param path:               Path to the configuration file.
-		:returns:                  The configuration file, with its variables, jobs and workflow attached.
+		:returns:                  The configuration file, with its variables, jobs, workflow, includes and default
+		                           attached.
 		:raises PipelineFileError: If key ``stages`` is not a list.
 		:raises PipelineFileError: If key ``variables``, ``workflow`` or a job is not a mapping.
-		:raises PipelineFileError: If a key of a variable, a job or the workflow holds a value of the wrong kind.
+		:raises PipelineFileError: If a key of a variable, a job, the workflow or an include holds a value of the wrong
+		                           kind.
 		"""
 		stages = None
 		if (stageList := document.get("stages", None)) is not None:
@@ -652,7 +715,13 @@ class PipelineFile(Base[None]):
 		if "workflow" in document:
 			workflow = Workflow._FromYAML(document["workflow"], path, Base._KeyLine(document, "workflow"))
 
-		return cls(path, stages, variables, jobs, workflow)
+		includes = None
+		if "include" in document:
+			includes = Include._FromYAMLEntries(document["include"], path, Base._KeyLine(document, "include"))
+
+		default = Default._FromYAML(document, path)
+
+		return cls(path, stages, variables, jobs, workflow, includes, default)
 
 	def _Validate(self) -> None:
 		"""
@@ -1105,13 +1174,13 @@ class Job(Base[PipelineFile]):
 		return self._name
 
 	@staticmethod
-	def _Lines(value: Any, key: str, name: str, mapping: CommentedMap, path: Path) -> list[str]:
+	def _Lines(value: Any, key: str, owner: str, mapping: CommentedMap, path: Path) -> list[str]:
 		"""
 		Read a script key: a line, or a list of lines and nested lists of lines.
 
 		:param value:              The key's value.
 		:param key:                The key, for a message.
-		:param name:               Name of the job, for a message.
+		:param owner:              The element holding the key, for a message, as ``job 'build'``.
 		:param mapping:            The job's mapping, for the key's line.
 		:param path:               Path to the configuration file.
 		:returns:                  The lines, nested lists flattened.
@@ -1120,11 +1189,11 @@ class Job(Base[PipelineFile]):
 		if isinstance(value, CommentedSeq):
 			lines = []
 			for item in value:
-				lines.extend(Job._Lines(item, key, name, mapping, path))
+				lines.extend(Job._Lines(item, key, owner, mapping, path))
 
 			return lines
 		elif isinstance(value, CommentedMap):
-			ex = PipelineFileError(f"Key '{key}' of job '{name}' is not a script.", path, Base._KeyLine(mapping, key))
+			ex = PipelineFileError(f"Key '{key}' of {owner} is not a script.", path, Base._KeyLine(mapping, key))
 			ex.add_note(f"Got type '{getFullyQualifiedName(value)}'.")
 			raise ex
 
@@ -1226,9 +1295,9 @@ class Job(Base[PipelineFile]):
 			when=when,
 			allowFailure=allowFailure,
 			allowedExitCodes=exitCodes,
-			script=cls._Lines(mapping.get("script", None), "script", name, mapping, path),
-			beforeScript=cls._Lines(mapping.get("before_script", None), "before_script", name, mapping, path),
-			afterScript=cls._Lines(mapping.get("after_script", None), "after_script", name, mapping, path),
+			script=cls._Lines(mapping.get("script", None), "script", f"job '{name}'", mapping, path),
+			beforeScript=cls._Lines(mapping.get("before_script", None), "before_script", f"job '{name}'", mapping, path),
+			afterScript=cls._Lines(mapping.get("after_script", None), "after_script", f"job '{name}'", mapping, path),
 			image=cls._Name(mapping.get("image", None)),
 			services=services,
 			tags=tags,
@@ -1858,15 +1927,264 @@ class Workflow(Base[PipelineFile]):
 
 
 @export
-class Rule(Base[Union[Job, Workflow]]):
+class Include(Base[PipelineFile]):
 	"""
-	A rule of ``rules``, deciding whether a job is added to a pipeline, or a pipeline is created.
+	An entry of ``include``, which adds the configuration of other files.
+
+	:attr:`Kind` says where the files come from, :attr:`Location` names them: a path of the same repository, a URL, a
+	template's name, a component's reference, or the path of another project, whose files are in :attr:`Files`.
+	"""
+
+	_PARENT_TYPE: ClassVar[ParentTypes] = PipelineFile  #: An include belongs to a configuration file.
+
+	_kind:     IncludeKind        #: Where the included files come from.
+	_location: str                #: Path, URL, template's name, component's reference, or project's path.
+	_ref:      Nullable[str]      #: Reference of the project the files are read from.
+	_files:    tuple[str, ...]    #: Paths of the files of another project.
+	_inputs:   dict[str, ValueT]  #: Inputs passed to the included files, by name.
+	_rules:    list[Rule]         #: Rules deciding whether the files are included.
+
+	_KINDS: ClassVar[tuple[str, ...]] = tuple(member.value for member in IncludeKind)  #: Keys naming an include's kind.
+
+	def __init__(
+		self,
+		kind:     IncludeKind,
+		location: str,
+		line:     int,
+		files:    Nullable[Iterable[str]]        = None,
+		ref:      Nullable[str]                  = None,
+		inputs:   Nullable[Mapping[str, ValueT]] = None,
+		rules:    Nullable[Iterable[Rule]]       = None,
+		*,
+		parent:   Nullable[PipelineFile]         = None
+	) -> None:
+		"""
+		Initializes an entry of ``include``.
+
+		:param kind:        Where the included files come from.
+		:param location:    Path, URL, template's name, component's reference, or - for another project - its path.
+		:param line:        Line the entry is written at, starting at 1.
+		:param files:       Optional, paths of the files of another project. Default: ``None``.
+		:param ref:         Optional, reference of the project the files are read from. Default: ``None``.
+		:param inputs:      Optional, inputs passed to the included files, by name. Default: ``None``.
+		:param rules:       Optional, rules deciding whether the files are included, which are attached to the entry.
+		                    Default: ``None``.
+		:param parent:      Optional, reference to the configuration file. Default: ``None``.
+		:raises ValueError: If parameter 'kind' or 'location' is ``None``.
+		:raises TypeError:  If parameter 'kind' is not of type :class:`IncludeKind`.
+		:raises TypeError:  If parameter 'location' or 'ref' is not of type :class:`str`.
+		:raises ValueError: If parameter 'location' is empty.
+		:raises TypeError:  If an element of parameter 'files' is not of type :class:`str`.
+		:raises TypeError:  If an element of parameter 'rules' is not of type :class:`Rule`.
+		"""
+		super().__init__(line, parent=parent)
+
+		if kind is None:
+			raise ValueError("Parameter 'kind' is None.")
+		elif not isinstance(kind, IncludeKind):
+			ex = TypeError("Parameter 'kind' is not of type 'IncludeKind'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(kind)}'.")
+			raise ex
+
+		if location is None:
+			raise ValueError("Parameter 'location' is None.")
+		elif not isinstance(location, str):
+			ex = TypeError("Parameter 'location' is not of type 'str'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(location)}'.")
+			raise ex
+		elif location == "":
+			raise ValueError("Parameter 'location' is empty.")
+
+		if ref is not None and not isinstance(ref, str):
+			ex = TypeError("Parameter 'ref' is not of type 'str'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(ref)}'.")
+			raise ex
+
+		self._files = () if files is None else tuple(files)
+		for file in self._files:
+			if not isinstance(file, str):
+				ex = TypeError("An element of parameter 'files' is not of type 'str'.")
+				ex.add_note(f"Got type '{getFullyQualifiedName(file)}'.")
+				raise ex
+
+		self._kind =     kind
+		self._location = location
+		self._ref =      ref
+		self._inputs =   {} if inputs is None else dict(inputs)
+		self._rules =    []
+
+		if rules is not None:
+			for rule in rules:
+				if not isinstance(rule, Rule):
+					ex = TypeError("An element of parameter 'rules' is not of type 'Rule'.")
+					ex.add_note(f"Got type '{getFullyQualifiedName(rule)}'.")
+					raise ex
+
+				self._rules.append(rule)
+				rule.Parent = self
+
+		if parent is not None:
+			parent._includes.append(self)
+
+	@Base.Parent.setter
+	def Parent(self, value: PipelineFile) -> None:
+		Base.Parent.fset(self, value)
+
+		for rule in self._rules:
+			rule.Parent = self
+
+	@readonly
+	def Kind(self) -> IncludeKind:
+		"""
+		Read-only property to access where the included files come from (:attr:`_kind`).
+
+		:returns: The kind of the include.
+		"""
+		return self._kind
+
+	@readonly
+	def Location(self) -> str:
+		"""
+		Read-only property to access what the entry includes (:attr:`_location`).
+
+		:returns: A path, a URL, a template's name, a component's reference, or another project's path, as written.
+		"""
+		return self._location
+
+	@readonly
+	def Ref(self) -> Nullable[str]:
+		"""
+		Read-only property to access the reference of the project the files are read from (:attr:`_ref`).
+
+		:returns: The ``ref`` key, or ``None`` - the project's default branch then.
+		"""
+		return self._ref
+
+	@readonly
+	def Files(self) -> tuple[str, ...]:
+		"""
+		Read-only property to access the paths of the files of another project (:attr:`_files`).
+
+		:returns: The paths of ``file``, in file order.
+		"""
+		return self._files
+
+	@readonly
+	def Inputs(self) -> dict[str, ValueT]:
+		"""
+		Read-only property to access the inputs passed to the included files (:attr:`_inputs`).
+
+		:returns: The inputs' values, by name, with the types they are written with.
+		"""
+		return self._inputs
+
+	@readonly
+	def Rules(self) -> list[Rule]:
+		"""
+		Read-only property to access the rules deciding whether the files are included (:attr:`_rules`).
+
+		:returns: The rules, in the order GitLab evaluates them.
+		"""
+		return self._rules
+
+	def __str__(self) -> str:
+		"""
+		Return the include's kind and location.
+
+		:returns: The kind and the location, as ``local: /ci/build.yml``.
+		"""
+		return f"{self._kind.value}: {self._location}"
+
+	@classmethod
+	def _FromYAML(cls, entry: Any, path: Path, line: int) -> Self:
+		"""
+		Read an entry of ``include``: a path or a URL, or a mapping with one key of :attr:`_KINDS`.
+
+		:param entry:              The entry.
+		:param path:               Path to the configuration file.
+		:param line:               Line the entry is written at, starting at 1.
+		:returns:                  The include.
+		:raises PipelineFileError: If the entry is neither a string nor a mapping.
+		:raises PipelineFileError: If the mapping has none, or more than one, of the keys of :attr:`_KINDS`.
+		:raises PipelineFileError: If key ``file`` of another project's include is missing, or not a path or a list.
+		:raises PipelineFileError: If key ``inputs`` is not a mapping.
+		:raises PipelineFileError: If a rule is malformed.
+		"""
+		if isinstance(entry, CommentedSeq) or entry is None:
+			ex = PipelineFileError("Include is neither a path nor a mapping.", path, line)
+			ex.add_note(f"Got type '{getFullyQualifiedName(entry)}'.")
+			raise ex
+		elif not isinstance(entry, CommentedMap):
+			location = Base._ToText(entry)
+			kind = IncludeKind.Remote if location.startswith(("https://", "http://")) else IncludeKind.Local
+			return cls(kind, location, line)
+
+		kinds = [key for key in cls._KINDS if key in entry]
+		if len(kinds) != 1:
+			count = "none" if len(kinds) == 0 else "more than one"
+			ex = PipelineFileError(f"Include has {count} of its kinds' keys.", path, line)
+			ex.add_note(f"Kinds: {', '.join(cls._KINDS)}.")
+			raise ex
+
+		kind = IncludeKind(kinds[0])
+		files = None
+		if kind is IncludeKind.Project:
+			if (fileValue := entry.get("file", None)) is None:
+				raise PipelineFileError("Include of another project has no 'file' key.", path, line)
+			elif isinstance(fileValue, CommentedMap):
+				ex = PipelineFileError("Key 'file' of an include is neither a path nor a list.", path, line)
+				ex.add_note(f"Got type '{getFullyQualifiedName(fileValue)}'.")
+				raise ex
+
+			fileList = fileValue if isinstance(fileValue, CommentedSeq) else [fileValue]
+			files = [Base._ToText(file) for file in fileList]
+
+		inputs = entry.get("inputs", None)
+		if inputs is not None and not isinstance(inputs, CommentedMap):
+			ex = PipelineFileError("Key 'inputs' of an include is not a mapping.", path, Base._KeyLine(entry, "inputs"))
+			ex.add_note(f"Got type '{getFullyQualifiedName(inputs)}'.")
+			raise ex
+
+		rules = None
+		if "rules" in entry:
+			rules = Rule._FromYAMLEntries(entry["rules"], "an include", path, Base._KeyLine(entry, "rules"))
+
+		ref = entry.get("ref", None)
+		return cls(
+			kind, Base._ToText(entry[kinds[0]]), line,
+			files=files,
+			ref=None if ref is None else Base._ToText(ref),
+			inputs=None if inputs is None else Base._ToPython(inputs),
+			rules=rules
+		)
+
+	@classmethod
+	def _FromYAMLEntries(cls, value: Any, path: Path, line: int) -> list[Self]:
+		"""
+		Read the ``include`` key: an entry, or a list of entries.
+
+		:param value:              The key's value.
+		:param path:               Path to the configuration file.
+		:param line:               Line the ``include`` key is written at, starting at 1.
+		:returns:                  The includes, in file order.
+		:raises PipelineFileError: If an entry is malformed.
+		"""
+		if not isinstance(value, CommentedSeq):
+			return [cls._FromYAML(value, path, line)]
+
+		return [cls._FromYAML(entry, path, Base._ItemLine(value, index)) for index, entry in enumerate(value)]
+
+
+@export
+class Rule(Base[Union[Job, Workflow, Include]]):
+	"""
+	A rule of ``rules``, deciding whether a job is added to a pipeline, a pipeline is created, or a file is included.
 
 	GitLab evaluates the rules in order; the first one matching decides. A rule matches if its :attr:`Condition`, its
 	:attr:`Changes` and its :attr:`Exists` match, as far as it has them.
 	"""
 
-	_PARENT_TYPE: ClassVar[ParentTypes] = (Job, Workflow)  #: A rule belongs to a job or a workflow.
+	_PARENT_TYPE: ClassVar[ParentTypes] = (Job, Workflow, Include)  #: A rule belongs to a job, a workflow or an include.
 
 	_condition:    Nullable[str]    #: Expression of the rule's ``if``.
 	_changes:      tuple[str, ...]  #: Paths of the rule's ``changes``.
@@ -1879,15 +2197,15 @@ class Rule(Base[Union[Job, Workflow]]):
 	def __init__(
 		self,
 		line:         int,
-		condition:    Nullable[str]                 = None,
-		changes:      Nullable[Iterable[str]]       = None,
-		compareTo:    Nullable[str]                 = None,
-		exists:       Nullable[Iterable[str]]       = None,
-		when:         Nullable[When]                = None,
-		allowFailure: Nullable[bool]                = None,
-		variables:    Nullable[Mapping[str, str]]   = None,
+		condition:    Nullable[str]                           = None,
+		changes:      Nullable[Iterable[str]]                 = None,
+		compareTo:    Nullable[str]                           = None,
+		exists:       Nullable[Iterable[str]]                 = None,
+		when:         Nullable[When]                          = None,
+		allowFailure: Nullable[bool]                          = None,
+		variables:    Nullable[Mapping[str, str]]             = None,
 		*,
-		parent:       Nullable[Union[Job, Workflow]] = None
+		parent:       Nullable[Union[Job, Workflow, Include]] = None
 	) -> None:
 		"""
 		Initializes a rule.
@@ -1900,7 +2218,7 @@ class Rule(Base[Union[Job, Workflow]]):
 		:param when:         Optional, when the job runs, if the rule matches. Default: ``None``.
 		:param allowFailure: Optional, ``True``, if the pipeline continues when the job fails. Default: ``None``.
 		:param variables:    Optional, variables set, if the rule matches, by name. Default: ``None``.
-		:param parent:       Optional, reference to the job or workflow the rule belongs to. Default: ``None``.
+		:param parent:       Optional, reference to the job, workflow or include the rule belongs to. Default: ``None``.
 		:raises TypeError:   If parameter 'condition' or 'compareTo' is not of type :class:`str`.
 		:raises TypeError:   If an element of parameter 'changes' or 'exists' is not of type :class:`str`.
 		:raises TypeError:   If parameter 'when' is not of type :class:`When`.
@@ -2110,3 +2428,186 @@ class Rule(Base[Union[Job, Workflow]]):
 			))
 
 		return rules
+
+
+@export
+class Default(Base[PipelineFile]):
+	"""
+	The ``default`` key of a configuration file: keys every job gets, unless it sets them itself.
+
+	The global keywords ``image``, ``services``, ``before_script`` and ``after_script`` - deprecated forms of
+	``default`` - are read into it too, unless ``default`` sets them.
+	"""
+
+	_PARENT_TYPE: ClassVar[ParentTypes] = PipelineFile  #: A default belongs to a configuration file.
+
+	_image:        Nullable[str]    #: Image of the container a job runs in.
+	_services:     tuple[str, ...]  #: Images of the service containers.
+	_tags:         tuple[str, ...]  #: Tags selecting the runner.
+	_beforeScript: tuple[str, ...]  #: Lines of ``before_script``.
+	_afterScript:  tuple[str, ...]  #: Lines of ``after_script``.
+
+	_KEYS: ClassVar[tuple[str, ...]] = ("image", "services", "before_script", "after_script")  #: The global keywords.
+
+	def __init__(
+		self,
+		line:         int,
+		image:        Nullable[str]           = None,
+		services:     Nullable[Iterable[str]] = None,
+		tags:         Nullable[Iterable[str]] = None,
+		beforeScript: Nullable[Iterable[str]] = None,
+		afterScript:  Nullable[Iterable[str]] = None,
+		*,
+		parent:       Nullable[PipelineFile]  = None
+	) -> None:
+		"""
+		Initializes the ``default`` key.
+
+		:param line:         Line the ``default`` key, or the first global keyword, is written at, starting at 1.
+		:param image:        Optional, image of the container a job runs in. Default: ``None``.
+		:param services:     Optional, images of the service containers. Default: ``None``.
+		:param tags:         Optional, tags selecting the runner. Default: ``None``.
+		:param beforeScript: Optional, lines of ``before_script``. Default: ``None``.
+		:param afterScript:  Optional, lines of ``after_script``. Default: ``None``.
+		:param parent:       Optional, reference to the configuration file. Default: ``None``.
+		:raises TypeError:   If parameter 'image' is not of type :class:`str`.
+		:raises TypeError:   If an element of parameter 'services', 'tags', 'beforeScript' or 'afterScript' is not of
+		                     type :class:`str`.
+		"""
+		super().__init__(line, parent=parent)
+
+		if image is not None and not isinstance(image, str):
+			ex = TypeError("Parameter 'image' is not of type 'str'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(image)}'.")
+			raise ex
+
+		self._services =     () if services is None else tuple(services)
+		self._tags =         () if tags is None else tuple(tags)
+		self._beforeScript = () if beforeScript is None else tuple(beforeScript)
+		self._afterScript =  () if afterScript is None else tuple(afterScript)
+		for parameterName, texts in (
+			("services",     self._services),
+			("tags",         self._tags),
+			("beforeScript", self._beforeScript),
+			("afterScript",  self._afterScript)
+		):
+			for text in texts:
+				if not isinstance(text, str):
+					ex = TypeError(f"An element of parameter '{parameterName}' is not of type 'str'.")
+					ex.add_note(f"Got type '{getFullyQualifiedName(text)}'.")
+					raise ex
+
+		self._image = image
+
+		if parent is not None:
+			parent._default = self
+
+	@readonly
+	def Image(self) -> Nullable[str]:
+		"""
+		Read-only property to access the image of the container a job runs in (:attr:`_image`).
+
+		:returns: The image, or ``None`` if the default names none.
+		"""
+		return self._image
+
+	@readonly
+	def Services(self) -> tuple[str, ...]:
+		"""
+		Read-only property to access the images of the service containers (:attr:`_services`).
+
+		:returns: The images, in file order.
+		"""
+		return self._services
+
+	@readonly
+	def Tags(self) -> tuple[str, ...]:
+		"""
+		Read-only property to access the tags selecting the runner (:attr:`_tags`).
+
+		:returns: The tags, in file order.
+		"""
+		return self._tags
+
+	@readonly
+	def BeforeScript(self) -> tuple[str, ...]:
+		"""
+		Read-only property to access the lines of ``before_script`` (:attr:`_beforeScript`).
+
+		:returns: The lines, nested lists flattened.
+		"""
+		return self._beforeScript
+
+	@readonly
+	def AfterScript(self) -> tuple[str, ...]:
+		"""
+		Read-only property to access the lines of ``after_script`` (:attr:`_afterScript`).
+
+		:returns: The lines, nested lists flattened.
+		"""
+		return self._afterScript
+
+	@classmethod
+	def _FromYAML(cls, document: CommentedMap, path: Path) -> Nullable[Self]:
+		"""
+		Read the ``default`` key and the global keywords standing for it.
+
+		:param document:           The configuration.
+		:param path:               Path to the configuration file.
+		:returns:                  The default, or ``None`` if the configuration has neither.
+		:raises PipelineFileError: If key ``default`` is not a mapping.
+		:raises PipelineFileError: If a key holds a value of the wrong kind.
+		"""
+		mapping = CommentedMap()
+		line = None
+		if "default" in document:
+			line = Base._KeyLine(document, "default")
+			if not isinstance(document["default"], CommentedMap):
+				ex = PipelineFileError("Key 'default' is not a mapping.", path, line)
+				ex.add_note(f"Got type '{getFullyQualifiedName(document['default'])}'.")
+				raise ex
+
+			mapping = document["default"]
+
+		globalKeys = {key: document[key] for key in cls._KEYS if key in document and key not in mapping}
+		if line is None and len(globalKeys) == 0:
+			return None
+		elif line is None:
+			line = min(Base._KeyLine(document, key) for key in globalKeys)
+
+		def value(key: str) -> Any:
+			"""
+			Nested function returning a key of ``default``, or else the global keyword.
+
+			:param key: The key.
+			:returns:   The key's value, or ``None``.
+			"""
+			return mapping[key] if key in mapping else globalKeys.get(key, None)
+
+		owner = mapping if "default" in document else document
+		services = None
+		if (serviceList := value("services")) is not None:
+			if not isinstance(serviceList, CommentedSeq):
+				ex = PipelineFileError("Key 'services' of the default is not a list.", path, line)
+				ex.add_note(f"Got type '{getFullyQualifiedName(serviceList)}'.")
+				raise ex
+
+			services = [service for item in serviceList if (service := Job._Name(item)) is not None]
+
+		tags = None
+		if (tagList := value("tags")) is not None:
+			if not isinstance(tagList, CommentedSeq):
+				ex = PipelineFileError("Key 'tags' of the default is not a list.", path, line)
+				ex.add_note(f"Got type '{getFullyQualifiedName(tagList)}'.")
+				raise ex
+
+			tags = [Base._ToText(tag) for tag in tagList]
+
+		return cls(
+			line,
+			image=Job._Name(value("image")),
+			services=services,
+			tags=tags,
+			beforeScript=Job._Lines(value("before_script"), "before_script", "the default", owner, path),
+			afterScript=Job._Lines(value("after_script"), "after_script", "the default", owner, path)
+		)
