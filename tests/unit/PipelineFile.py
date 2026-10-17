@@ -29,7 +29,7 @@
 # ==================================================================================================================== #
 """
 Unit tests for :mod:`pyTooling.GitLab.PipelineFile`: the configuration file, its stages, variables,
-jobs, needs, rules, workflow, includes and default.
+jobs, needs, rules, workflow, includes and default, and how jobs extend each other.
 """
 from pathlib                       import Path
 from tempfile                      import TemporaryDirectory
@@ -1500,3 +1500,191 @@ class IncludeErrors(Fixture):
 			PipelineFile.FromFile(self._Write("default:\n  before_script:\n    run: a\n"))
 		self.assertEqual("Key 'before_script' of the default is not a script.", str(context.exception))
 		self.assertEqual(2, context.exception.Line)
+
+
+@testsuite("Extends, references and default")
+class Extends(Fixture):
+	"""Merging the jobs a job extends, resolving '!reference' tags, and giving jobs the default."""
+
+	@testcase("Deep merge")
+	def DeepMerge(self) -> None:
+		"""
+		A job's keys are those of the job it extends, mappings merged, its own keys winning.
+
+		Checks job 'job' of the fixture.
+		"""
+		job = PipelineFile.FromFile(DATA / "Extends.yml").Jobs["job"]
+
+		self.assertEqual((".base", ), job.Extends)
+		self.assertEqual((), job.Unresolved)
+		self.assertEqual("build", job.Stage)
+		self.assertEqual(("base", ), job.Tags)
+		self.assertEqual(["VAR1", "VAR2"], list(job.Variables))
+		self.assertEqual("job 1", job.Variables["VAR1"].Value)
+		self.assertEqual("base 2", job.Variables["VAR2"].Value)
+		self.assertEqual(19, job.Variables["VAR2"].Line)
+
+	@testcase("References")
+	def References(self) -> None:
+		"""
+		A '!reference' in a list splices the referred list in; references nest.
+
+		Checks the script and the rules of job 'job', and job 'nested'.
+		"""
+		jobs = PipelineFile.FromFile(DATA / "Extends.yml").Jobs
+
+		self.assertEqual(("echo setup", "echo job"), jobs["job"].Script)
+		self.assertEqual(2, len(jobs["job"].Rules))
+		self.assertEqual("$A", jobs["job"].Rules[0].Condition)
+		self.assertEqual(27, jobs["job"].Rules[0].Line)
+		self.assertIs(When.Never, jobs["job"].Rules[1].When)
+		self.assertEqual(("echo one", "echo two"), jobs["nested"].Script)
+
+	@testcase("Several jobs extended")
+	def Several(self) -> None:
+		"""
+		The jobs of an 'extends' list merge in order, a later one winning.
+
+		Checks job 'multi'.
+		"""
+		multi = PipelineFile.FromFile(DATA / "Extends.yml").Jobs["multi"]
+
+		self.assertEqual((".base", ".other"), multi.Extends)
+		self.assertEqual("test", multi.Stage)
+		self.assertEqual("python", multi.Image)
+		self.assertEqual(("base", ), multi.Tags)
+		self.assertEqual(("base", ), multi.Script)
+
+	@testcase("Null removes a key")
+	def Null(self) -> None:
+		"""
+		A key set to null removes what the extended job has.
+
+		Checks job 'nulled'.
+		"""
+		nulled = PipelineFile.FromFile(DATA / "Extends.yml").Jobs["nulled"]
+
+		self.assertEqual({}, nulled.Variables)
+		self.assertEqual(("base", ), nulled.Script)
+
+	@testcase("Default")
+	def Default(self) -> None:
+		"""
+		A job gets the default's keys it doesn't set, unless 'inherit.default' excludes them; a hidden job doesn't.
+
+		Checks jobs 'job', 'noDefault', 'someDefault' and hidden job '.base'.
+		"""
+		pipelineFile = PipelineFile.FromFile(DATA / "Extends.yml")
+		jobs = pipelineFile.Jobs
+
+		self.assertEqual("alpine", jobs["job"].Image)
+		self.assertEqual(("echo default", ), jobs["job"].BeforeScript)
+
+		self.assertIsNone(jobs["noDefault"].Image)
+		self.assertEqual((), jobs["noDefault"].Tags)
+
+		self.assertEqual("alpine", jobs["someDefault"].Image)
+		self.assertEqual((), jobs["someDefault"].Tags)
+
+		self.assertIsNone(pipelineFile.HiddenJobs[".base"].Image)
+
+	@testcase("Unresolved with includes")
+	def Unresolved(self) -> None:
+		"""
+		A file including files may extend or refer to jobs it doesn't have; the job lists them.
+
+		Reads a file including a file, whose job extends and refers to a missing job.
+		"""
+		path = self._Write(dedent("""\
+			include: /ci/templates.yml
+			job:
+			  extends: .template
+			  script:
+			    - !reference [.setup, script]
+			    - echo job
+			"""))
+		job = PipelineFile.FromFile(path).Jobs["job"]
+
+		self.assertEqual((".template", ), job.Extends)
+		self.assertEqual(("!reference [.setup, script]", "extends .template"), job.Unresolved)
+		self.assertEqual(("echo job", ), job.Script)
+
+	@testcase("Constructed")
+	def Constructed(self) -> None:
+		"""
+		A job is constructed with the names it extends and what it couldn't resolve.
+
+		Checks the properties and the TypeError.
+		"""
+		job = Job("a", 1, extends=[".base"], unresolved=["extends .base"])
+		self.assertEqual((".base", ), job.Extends)
+		self.assertEqual(("extends .base", ), job.Unresolved)
+
+		with self.assertRaises(TypeError) as context:
+			Job("a", 1, extends=[1])
+		self.assertEqual("An element of parameter 'extends' is not of type 'str'.", str(context.exception))
+
+
+@testsuite("Malformed extends and references")
+class ExtendsErrors(Fixture):
+	"""What can't be resolved, without included files to explain it, raises PipelineFileError."""
+
+	@testcase("Missing job")
+	def MissingJob(self) -> None:
+		"""
+		A job extends a job of the file, if the file includes no files.
+
+		Checks message and line.
+		"""
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("job:\n  extends: .base\n  script: x\n"))
+		self.assertEqual("Job 'job' extends job '.base', which the file doesn't have.", str(context.exception))
+		self.assertEqual(2, context.exception.Line)
+
+	@testcase("Missing key")
+	def MissingKey(self) -> None:
+		"""
+		A reference refers to a key of the file, if the file includes no files - and always in 'default'.
+
+		Checks message and line of both errors.
+		"""
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write(".a:\n  b: 1\njob:\n  script:\n    - !reference [.a, script]\n"))
+		self.assertEqual(
+			"Reference [.a, script] of job 'job' refers to a key the file doesn't have.", str(context.exception)
+		)
+		self.assertEqual(5, context.exception.Line)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("include: a.yml\ndefault:\n  before_script: !reference [.a, b]\n"))
+		self.assertEqual("Reference [.a, b] of the default refers to a key the file doesn't have.", str(context.exception))
+
+	@testcase("Cycle")
+	def Cycle(self) -> None:
+		"""
+		Jobs don't extend each other in a cycle.
+
+		Checks the message naming the cycle.
+		"""
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write(".a:\n  extends: .b\n.b:\n  extends: .a\n"))
+		self.assertEqual("Jobs extend each other in a cycle: .a -> .b -> .a.", str(context.exception))
+		self.assertEqual(3, context.exception.Line)
+
+	@testcase("Too deep")
+	def TooDeep(self) -> None:
+		"""
+		'extends' nests at most 11 levels, '!reference' tags 10.
+
+		Checks both messages.
+		"""
+		chain = "".join(f".j{level}:\n  extends: .j{level + 1}\n" for level in range(12)) + ".j12:\n  script: x\n"
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write(chain))
+		self.assertEqual("Job '.j11' extends more than 11 levels.", str(context.exception))
+
+		references = ".r:\n" + "".join(f"  l{level}:\n    - !reference [.r, l{level + 1}]\n" for level in range(11))
+		references += "  l11: [echo]\njob:\n  script:\n    - !reference [.r, l0]\n"
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write(references))
+		self.assertIn("nests more than 10 levels.", str(context.exception))

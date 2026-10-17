@@ -1,0 +1,65 @@
+# A configuration whose jobs extend hidden jobs, refer to their keys, and get the default.
+stages: [build, test]
+
+default:
+  image: alpine
+  tags: [default-runner]
+  before_script: [echo default]
+
+.setup:
+  script:
+    - echo setup
+
+.base:
+  stage: build
+  tags: [base]
+  script: base
+  variables:
+    VAR1: base 1
+    VAR2: base 2
+
+.other:
+  stage: test
+  image: python
+
+.rules:
+  rules:
+    - if: $A
+
+.snippets:
+  one: [echo one]
+  two:
+    - !reference [.snippets, one]
+    - echo two
+
+job:
+  extends: .base
+  variables:
+    VAR1: job 1
+  script:
+    - !reference [.setup, script]
+    - echo job
+  rules:
+    - !reference [.rules, rules]
+    - when: never
+
+multi:
+  extends: [.base, .other]
+
+nulled:
+  extends: .base
+  variables: null
+
+noDefault:
+  inherit:
+    default: false
+  script: x
+
+someDefault:
+  inherit:
+    default: [image]
+  script: x
+
+nested:
+  script:
+    - !reference [.snippets, two]
