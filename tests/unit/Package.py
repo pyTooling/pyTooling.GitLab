@@ -31,9 +31,40 @@
 """
 Unit tests for :mod:`pyTooling.GitLab`.
 """
+from pyTooling.Testing    import Testcase, testsuite, testcase
+from pyTooling.Versioning import SemanticVersion
+
+from pyTooling            import GitLab
 
 
 if __name__ == "__main__":  # pragma: no cover
 	print("ERROR: you called a testcase declaration file as an executable module.")
 	print("Use: 'python -m unittest <testcase module>'")
 	exit(1)
+
+
+@testsuite("Package metadata")
+class Metadata(Testcase):
+	"""The metadata of package :mod:`pyTooling.GitLab`, which the packaging reads."""
+
+	@testcase("Version")
+	def Version(self) -> None:
+		"""
+		The version is a semantic version.
+
+		Parses '__version__' as a 'SemanticVersion'.
+		"""
+		version = SemanticVersion.Parse(GitLab.__version__)
+
+		self.assertIsInstance(version, SemanticVersion)
+
+	@testcase("URLs")
+	def URLs(self) -> None:
+		"""
+		The project, documentation and issue tracker URLs name the repository.
+
+		Checks the end of each URL.
+		"""
+		self.assertTrue(GitLab.__project_url__.endswith("/pyTooling.GitLab"))
+		self.assertTrue(GitLab.__documentation_url__.endswith("/pyTooling.GitLab"))
+		self.assertTrue(GitLab.__issue_tracker_url__.endswith("/pyTooling.GitLab/issues"))
