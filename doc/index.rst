@@ -5,6 +5,7 @@
 .. shields::
    :github:                pyTooling/pyTooling.GitLab
    :pypi:                  pyTooling.GitLab
+   :codacy:                dae89de7264d479daf8d6197c8ed2186
    :source-license:        github:LICENSE.md
    :documentation-license: CC-BY-4.0 github:doc/Doc-License.rst
    :github-action:         Pipeline.yml@main
@@ -12,7 +13,7 @@
 
    github, src-license, ghp-doc, doc-license
    pypi-tag, pypi-status, pypi-python
-   github-action, lib-status, codecov-coverage
+   github-action, lib-status, codacy-quality, codacy-coverage, codecov-coverage
 
 --------------------------------------------------------------------------------
 
