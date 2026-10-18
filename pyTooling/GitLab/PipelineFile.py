@@ -67,11 +67,11 @@ from __future__               import annotations
 from itertools                import product
 from pathlib                  import Path
 from typing                   import Any, ClassVar, Generic, Hashable, Iterable, Iterator, Mapping, Optional as Nullable
-from typing                   import Self, TypeVar, Union
+from typing                   import Self, Sequence, TypeVar, Union
 
 from pyTooling.CI             import DependencyMixin, Job as CIJob, JobGroup, Matrix as CIMatrix
 from pyTooling.CI             import MatrixJob as CIMatrixJob, MatrixWorkflow as CIMatrixWorkflow
-from pyTooling.CI             import Pipeline as CIPipeline, Workflow as CIWorkflow
+from pyTooling.CI             import Pipeline as CIPipeline, Rule as CIRule, RuleOutcome, Workflow as CIWorkflow
 
 from pyTooling.Common         import getFullyQualifiedName, StringEnum
 from pyTooling.Decorators     import export, readonly
@@ -161,18 +161,6 @@ class PipelineFileError(GitLabError):
 		:returns: The line, starting at 1, or ``None`` if the problem isn't tied to a line.
 		"""
 		return self._line
-
-
-@export
-class When(StringEnum):
-	"""When a job runs, as ``when`` names it."""
-
-	OnSuccess = "on_success"  #: When no job of an earlier stage failed.
-	OnFailure = "on_failure"  #: When a job of an earlier stage failed.
-	Never =     "never"       #: Never.
-	Always =    "always"      #: Whatever the jobs of earlier stages did.
-	Manual =    "manual"      #: When started by hand.
-	Delayed =   "delayed"     #: After the time given by ``start_in``.
 
 
 @export
@@ -1342,26 +1330,26 @@ class Job(Base[PipelineFile]):
 
 	_PARENT_TYPE: ClassVar[ParentTypes] = PipelineFile  #: A job is contained in a configuration file.
 
-	_name:             str                   #: Name of the job, the key it is declared under.
-	_stage:            str                   #: Stage the job runs in.
-	_needs:            Nullable[list[Need]]  #: Entries of the job's ``needs``, or ``None`` without a ``needs`` key.
-	_rules:            list[Rule]            #: Rules deciding whether the job is added to a pipeline.
-	_when:             Nullable[When]        #: When the job runs.
-	_allowFailure:     Nullable[bool]        #: ``True``, if the pipeline continues when the job fails.
-	_allowedExitCodes: tuple[int, ...]       #: Exit codes, with which the job may fail.
-	_script:           tuple[str, ...]       #: Lines of the job's ``script``.
-	_beforeScript:     tuple[str, ...]       #: Lines of the job's ``before_script``.
-	_afterScript:      tuple[str, ...]       #: Lines of the job's ``after_script``.
-	_image:            Nullable[str]         #: Image of the container the job runs in.
-	_services:         tuple[str, ...]       #: Images of the service containers.
-	_tags:             tuple[str, ...]       #: Tags selecting the runner.
-	_environment:      Nullable[str]         #: Name of the environment the job deploys to.
-	_variables:        dict[str, Variable]   #: Variables of the job, by name, in file order.
-	_inputs:           dict[str, Input]      #: Inputs of the job, by name, in file order.
-	_parallel:         Nullable[Parallel]    #: The job's ``parallel``.
-	_trigger:          Nullable[Trigger]     #: The pipeline the job starts.
-	_extends:          tuple[str, ...]       #: Names of the jobs this job extends.
-	_unresolved:       tuple[str, ...]       #: What the job refers to, but its file doesn't have.
+	_name:             str                    #: Name of the job, the key it is declared under.
+	_stage:            str                    #: Stage the job runs in.
+	_needs:            Nullable[list[Need]]   #: Entries of the job's ``needs``, or ``None`` without a ``needs`` key.
+	_rules:            list[Rule]             #: Rules deciding whether the job is added to a pipeline.
+	_when:             Nullable[RuleOutcome]  #: When the job runs.
+	_allowFailure:     Nullable[bool]         #: ``True``, if the pipeline continues when the job fails.
+	_allowedExitCodes: tuple[int, ...]        #: Exit codes, with which the job may fail.
+	_script:           tuple[str, ...]        #: Lines of the job's ``script``.
+	_beforeScript:     tuple[str, ...]        #: Lines of the job's ``before_script``.
+	_afterScript:      tuple[str, ...]        #: Lines of the job's ``after_script``.
+	_image:            Nullable[str]          #: Image of the container the job runs in.
+	_services:         tuple[str, ...]        #: Images of the service containers.
+	_tags:             tuple[str, ...]        #: Tags selecting the runner.
+	_environment:      Nullable[str]          #: Name of the environment the job deploys to.
+	_variables:        dict[str, Variable]    #: Variables of the job, by name, in file order.
+	_inputs:           dict[str, Input]       #: Inputs of the job, by name, in file order.
+	_parallel:         Nullable[Parallel]     #: The job's ``parallel``.
+	_trigger:          Nullable[Trigger]      #: The pipeline the job starts.
+	_extends:          tuple[str, ...]        #: Names of the jobs this job extends.
+	_unresolved:       tuple[str, ...]        #: What the job refers to, but its file doesn't have.
 
 	def __init__(
 		self,
@@ -1369,7 +1357,7 @@ class Job(Base[PipelineFile]):
 		line:             int,
 		stage:            str                          = "test",
 		needs:            Nullable[Iterable[Need]]     = None,
-		when:             Nullable[When]               = None,
+		when:             Nullable[RuleOutcome]        = None,
 		allowFailure:     Nullable[bool]               = None,
 		allowedExitCodes: Nullable[Iterable[int]]      = None,
 		script:           Nullable[Iterable[str]]      = None,
@@ -1423,7 +1411,7 @@ class Job(Base[PipelineFile]):
 		:raises ValueError:      If parameter 'name' or 'stage' is ``None``.
 		:raises TypeError:       If parameter 'name' or 'stage' is not of type :class:`str`.
 		:raises ValueError:      If parameter 'name' or 'stage' is empty.
-		:raises TypeError:       If parameter 'when' is not of type :class:`When`.
+		:raises TypeError:       If parameter 'when' is not of type :class:`~pyTooling.CI.RuleOutcome`.
 		:raises TypeError:       If parameter 'allowFailure' is not of type :class:`bool`.
 		:raises TypeError:       If parameter 'image' or 'environment' is not of type :class:`str`.
 		:raises TypeError:       If an element of parameter 'allowedExitCodes' is not of type :class:`int`.
@@ -1451,8 +1439,8 @@ class Job(Base[PipelineFile]):
 			elif text == "":
 				raise ValueError(f"Parameter '{parameterName}' is empty.")
 
-		if when is not None and not isinstance(when, When):
-			ex = TypeError("Parameter 'when' is not of type 'When'.")
+		if when is not None and not isinstance(when, RuleOutcome):
+			ex = TypeError("Parameter 'when' is not of type 'RuleOutcome'.")
 			ex.add_note(f"Got type '{getFullyQualifiedName(when)}'.")
 			raise ex
 
@@ -1678,18 +1666,6 @@ class Job(Base[PipelineFile]):
 		return self._rules
 
 	@readonly
-	def Condition(self) -> Nullable[str]:
-		"""
-		Read-only property to return the condition under which the job runs, as :mod:`pyTooling.CI` names it.
-
-		GitLab's rules are evaluated in order, the first matching one deciding, so only a single rule's ``if`` is a
-		condition of its own.
-
-		:returns: The ``if`` of the job's only rule, or ``None`` for a job with no or several rules.
-		"""
-		return self._rules[0]._condition if len(self._rules) == 1 else None
-
-	@readonly
 	def Inputs(self) -> dict[str, Input]:
 		"""
 		Read-only property to access the inputs of the job (:attr:`_inputs`).
@@ -1717,7 +1693,7 @@ class Job(Base[PipelineFile]):
 		return self._trigger
 
 	@readonly
-	def When(self) -> Nullable[When]:
+	def When(self) -> Nullable[RuleOutcome]:
 		"""
 		Read-only property to access when the job runs (:attr:`_when`).
 
@@ -1892,13 +1868,13 @@ class Job(Base[PipelineFile]):
 		when = None
 		if (whenValue := mapping.get("when", None)) is not None:
 			try:
-				when = When.Parse(Base._ToText(whenValue))
+				when = RuleOutcome.Parse(Base._ToText(whenValue))
 			except ValueError as cause:
 				ex = PipelineFileError(
 					f"Key 'when' of job '{name}' is not a known value.", path, Base._KeyLine(mapping, "when")
 				)
 				ex.add_note(f"Got '{whenValue}'.")
-				ex.add_note(f"Allowed values: {', '.join(member.value for member in When)}.")
+				ex.add_note(f"Allowed values: {', '.join(member.value for member in RuleOutcome)}.")
 				raise ex from cause
 
 		allowFailure = Base._ToPython(mapping.get("allow_failure", None))
@@ -3102,24 +3078,24 @@ class Rule(Base[Union[Job, Workflow, Include]]):
 
 	_PARENT_TYPE: ClassVar[ParentTypes] = (Job, Workflow, Include)  #: A rule belongs to a job, a workflow or an include.
 
-	_condition:    Nullable[str]    #: Expression of the rule's ``if``.
-	_changes:      tuple[str, ...]  #: Paths of the rule's ``changes``.
-	_compareTo:    Nullable[str]    #: Reference ``changes`` is compared to.
-	_exists:       tuple[str, ...]  #: Paths of the rule's ``exists``.
-	_when:         Nullable[When]   #: When the job runs, if the rule matches.
-	_allowFailure: Nullable[bool]   #: ``True``, if the pipeline continues when the job fails, if the rule matches.
-	_variables:    dict[str, str]   #: Variables set, if the rule matches, by name.
+	_condition:    Nullable[str]          #: Expression of the rule's ``if``.
+	_changes:      tuple[str, ...]        #: Paths of the rule's ``changes``.
+	_compareTo:    Nullable[str]          #: Reference ``changes`` is compared to.
+	_exists:       tuple[str, ...]        #: Paths of the rule's ``exists``.
+	_when:         Nullable[RuleOutcome]  #: When the job runs, if the rule matches.
+	_allowFailure: Nullable[bool]         #: ``True``, if the pipeline continues when the job fails, if the rule matches.
+	_variables:    dict[str, str]         #: Variables set, if the rule matches, by name.
 
 	def __init__(
 		self,
 		line:         int,
-		condition:    Nullable[str]                           = None,
-		changes:      Nullable[Iterable[str]]                 = None,
-		compareTo:    Nullable[str]                           = None,
-		exists:       Nullable[Iterable[str]]                 = None,
-		when:         Nullable[When]                          = None,
-		allowFailure: Nullable[bool]                          = None,
-		variables:    Nullable[Mapping[str, str]]             = None,
+		condition:    Nullable[str]               = None,
+		changes:      Nullable[Iterable[str]]     = None,
+		compareTo:    Nullable[str]               = None,
+		exists:       Nullable[Iterable[str]]     = None,
+		when:         Nullable[RuleOutcome]       = None,
+		allowFailure: Nullable[bool]              = None,
+		variables:    Nullable[Mapping[str, str]] = None,
 		*,
 		parent:       Nullable[Union[Job, Workflow, Include]] = None
 	) -> None:
@@ -3137,7 +3113,7 @@ class Rule(Base[Union[Job, Workflow, Include]]):
 		:param parent:       Optional, reference to the job, workflow or include the rule belongs to. Default: ``None``.
 		:raises TypeError:   If parameter 'condition' or 'compareTo' is not of type :class:`str`.
 		:raises TypeError:   If an element of parameter 'changes' or 'exists' is not of type :class:`str`.
-		:raises TypeError:   If parameter 'when' is not of type :class:`When`.
+		:raises TypeError:   If parameter 'when' is not of type :class:`~pyTooling.CI.RuleOutcome`.
 		:raises TypeError:   If parameter 'allowFailure' is not of type :class:`bool`.
 		"""
 		super().__init__(line, parent=parent)
@@ -3163,8 +3139,8 @@ class Rule(Base[Union[Job, Workflow, Include]]):
 					ex.add_note(f"Got type '{getFullyQualifiedName(path)}'.")
 					raise ex
 
-		if when is not None and not isinstance(when, When):
-			ex = TypeError("Parameter 'when' is not of type 'When'.")
+		if when is not None and not isinstance(when, RuleOutcome):
+			ex = TypeError("Parameter 'when' is not of type 'RuleOutcome'.")
 			ex.add_note(f"Got type '{getFullyQualifiedName(when)}'.")
 			raise ex
 
@@ -3219,7 +3195,7 @@ class Rule(Base[Union[Job, Workflow, Include]]):
 		return self._exists
 
 	@readonly
-	def When(self) -> Nullable[When]:
+	def When(self) -> Nullable[RuleOutcome]:
 		"""
 		Read-only property to access when the job runs, if the rule matches (:attr:`_when`).
 
@@ -3312,11 +3288,11 @@ class Rule(Base[Union[Job, Workflow, Include]]):
 			when = None
 			if (whenValue := entry.get("when", None)) is not None:
 				try:
-					when = When.Parse(Base._ToText(whenValue))
+					when = RuleOutcome.Parse(Base._ToText(whenValue))
 				except ValueError as cause:
 					ex = PipelineFileError(f"Key 'when' of a rule of {owner} is not a known value.", path, entryLine)
 					ex.add_note(f"Got '{whenValue}'.")
-					ex.add_note(f"Allowed values: {', '.join(member.value for member in When)}.")
+					ex.add_note(f"Allowed values: {', '.join(member.value for member in RuleOutcome)}.")
 					raise ex from cause
 
 			allowFailure = Base._ToPython(entry.get("allow_failure", None))
@@ -4165,6 +4141,53 @@ class DefinitionMixin(Generic[DefinitionType], metaclass=ExtendedType, mixin=Tru
 			ex.add_note(f"Got type '{getFullyQualifiedName(definition)}'.")
 			raise ex
 
+	@staticmethod
+	def _Rules(rules: Sequence[Rule], when: Nullable[RuleOutcome], default: RuleOutcome) -> list[CIRule]:
+		"""
+		Return the :mod:`pyTooling.CI` rules of an element built from a configuration file.
+
+		Each of the file's rules becomes a rule deciding the rule's ``when``, else the element's, else ``default``. Its
+		``changes``, ``compare_to``, ``exists``, ``allow_failure`` and ``variables`` are the rule's key-value-pairs, as
+		far as it has them. An element with ``when``, but without rules, gets one rule without condition. The rules are
+		built anew for every element, as the instances of a matrix share one definition.
+
+		:param rules:   The rules of the file's element, in the order GitLab evaluates them.
+		:param when:    The ``when`` of the file's element, or ``None``.
+		:param default: What a rule decides, if neither the rule nor the element say.
+		:returns:       The rules, empty for an element with neither rules nor ``when``.
+		"""
+		if len(rules) == 0:
+			return [] if when is None else [CIRule(None, when)]
+
+		ciRules = []
+		for rule in rules:
+			keyValuePairs: dict[Hashable, Any] = {}
+			if len(rule._changes) > 0:
+				keyValuePairs["changes"] = rule._changes
+
+			if rule._compareTo is not None:
+				keyValuePairs["compare_to"] = rule._compareTo
+
+			if len(rule._exists) > 0:
+				keyValuePairs["exists"] = rule._exists
+
+			if rule._allowFailure is not None:
+				keyValuePairs["allow_failure"] = rule._allowFailure
+
+			if len(rule._variables) > 0:
+				keyValuePairs["variables"] = dict(rule._variables)
+
+			if rule._when is not None:
+				outcome = rule._when
+			elif when is not None:
+				outcome = when
+			else:
+				outcome = default
+
+			ciRules.append(CIRule(rule._condition, outcome, keyValuePairs=keyValuePairs))
+
+		return ciRules
+
 	def __init__(self, definition: DefinitionType) -> None:
 		"""
 		Initializes the link of an element to its definition, which :meth:`_CheckDefinition` checked.
@@ -4230,8 +4253,9 @@ class DefinedPipeline(CIPipeline, DefinitionMixin[PipelineFile]):
 		self._CheckDefinition(definition)
 
 		workflow = definition._workflow
-		name = definition._path.name if workflow is None or workflow._name is None else workflow._name
-		super().__init__(name, keyValuePairs=keyValuePairs)
+		name =     definition._path.name if workflow is None or workflow._name is None else workflow._name
+		rules =    [] if workflow is None else self._Rules(workflow._rules, None, RuleOutcome.Always)
+		super().__init__(name, rules=rules, keyValuePairs=keyValuePairs)
 		DefinitionMixin.__init__(self, definition)
 
 
@@ -4253,7 +4277,7 @@ class DefinedWorkflow(CIWorkflow, ChildPipelineMixin, DefinitionMixin[Job]):
 		Initializes a workflow built from a trigger job, named by the job's key.
 
 		The other project, or the child pipeline's files, are the workflow's :attr:`~pyTooling.CI.Workflow.Reference`,
-		the job's :attr:`~Job.Condition` the workflow's :attr:`~pyTooling.CI.ConditionMixin.Condition`.
+		the job's rules the workflow's :attr:`~pyTooling.CI.RulesMixin.Rules`.
 
 		:param definition:    The trigger job.
 		:param childFiles:    Optional, the files the child pipeline's elements are built from. Default: ``None``.
@@ -4269,8 +4293,9 @@ class DefinedWorkflow(CIWorkflow, ChildPipelineMixin, DefinitionMixin[Job]):
 			raise ex
 
 		super().__init__(
-			definition._name, reference=DefinedWorkflow._Reference(definition), condition=definition.Condition,
-			keyValuePairs=keyValuePairs, parent=parent
+			definition._name, reference=DefinedWorkflow._Reference(definition),
+			rules=self._Rules(definition._rules, definition._when, RuleOutcome.DEFAULT), keyValuePairs=keyValuePairs,
+			parent=parent
 		)
 		ChildPipelineMixin.__init__(self, childFiles)
 		DefinitionMixin.__init__(self, definition)
@@ -4318,7 +4343,10 @@ class DefinedMatrix(CIMatrix, DefinitionMixin[Job]):
 			ex.add_note(f"Got job '{definition._name}'.")
 			raise ex
 
-		super().__init__(definition._name, condition=definition.Condition, keyValuePairs=keyValuePairs, parent=parent)
+		super().__init__(
+			definition._name, rules=self._Rules(definition._rules, definition._when, RuleOutcome.DEFAULT),
+			keyValuePairs=keyValuePairs, parent=parent
+		)
 		DefinitionMixin.__init__(self, definition)
 
 
@@ -4359,8 +4387,9 @@ class DefinedMatrixWorkflow(CIMatrixWorkflow, ChildPipelineMixin, DefinitionMixi
 			raise ValueError("Parameter 'dimensions' is None.")
 
 		super().__init__(
-			definition._name, dimensions, reference=DefinedWorkflow._Reference(definition), condition=definition.Condition,
-			keyValuePairs=keyValuePairs, parent=parent
+			definition._name, dimensions, reference=DefinedWorkflow._Reference(definition),
+			rules=self._Rules(definition._rules, definition._when, RuleOutcome.DEFAULT), keyValuePairs=keyValuePairs,
+			parent=parent
 		)
 		ChildPipelineMixin.__init__(self, childFiles)
 		DefinitionMixin.__init__(self, definition)
@@ -4396,7 +4425,10 @@ class DefinedJob(CIJob, DefinitionMixin[Job]):
 		"""
 		self._CheckDefinition(definition)
 
-		super().__init__(definition._name, condition=definition.Condition, keyValuePairs=keyValuePairs, parent=parent)
+		super().__init__(
+			definition._name, rules=self._Rules(definition._rules, definition._when, RuleOutcome.DEFAULT),
+			keyValuePairs=keyValuePairs, parent=parent
+		)
 		DefinitionMixin.__init__(self, definition)
 
 
@@ -4430,7 +4462,8 @@ class DefinedMatrixJob(CIMatrixJob, DefinitionMixin[Job]):
 			raise ValueError("Parameter 'dimensions' is None.")
 
 		super().__init__(
-			definition._name, dimensions, condition=definition.Condition, keyValuePairs=keyValuePairs, parent=parent
+			definition._name, dimensions, rules=self._Rules(definition._rules, definition._when, RuleOutcome.DEFAULT),
+			keyValuePairs=keyValuePairs, parent=parent
 		)
 		DefinitionMixin.__init__(self, definition)
 
