@@ -25,6 +25,8 @@ The domain's directives are described on this page's siblings:
 
 :ref:`GLCI/Pipeline`
   |rarr| ``glci:pipeline`` and the entries of its inputs and variables, and the roles referring to them.
+:ref:`GLCI/Summaries`
+  |rarr| Tables and the interface of a pipeline file.
 
 .. contents:: Contents of this page
    :local:
@@ -105,10 +107,12 @@ so ``-W`` fails the build, and ``suppress_warnings = ["glci.drift"]`` silences i
 * A hand-written field repeats a fact of the pipeline file - *Type*, *Required* or *Default Value* of an input, and
   *Possible Values* or *Pattern* of an input stating ``options`` or ``regex``; *Type* and *Default Value* of a
   variable, and its *Possible Values* if it states ``options``. It is not shown; the file's value is.
+* An input has no entry in the document - neither a ``glci:input`` nor a ``glci:autoinputs`` - reported at the
+  ``glci:pipeline`` when the whole document was read.
 
 A pipeline file that can't be found or read is a warning of type ``glci.pipeline`` at the place in the file, as
-``Package.yml:8``, as is a ``glci:input`` or ``glci:variable`` without a preceding ``glci:pipeline``. A pipeline
-documented twice is a warning of type ``glci.duplicate``.
+``Package.yml:8``, as is a ``glci:input``, a ``glci:variable`` or a summary directive without a preceding
+``glci:pipeline``. A pipeline documented twice is a warning of type ``glci.duplicate``.
 
 
 .. _GLCI/API:

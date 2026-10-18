@@ -76,6 +76,8 @@ The pipeline files are read with ``ruamel.yaml`` when a directive runs, not when
 
    :mod:`pyTooling.GitLab.PipelineFile`
       |rarr| The model of a pipeline file the domain reads.
+   :mod:`pyTooling.GitLab.Sphinx.Reference`
+      |rarr| The directives summarizing a pipeline file: its parameters and its interface.
 """
 from __future__                      import annotations
 
@@ -886,13 +888,20 @@ def setup(sphinx: Sphinx) -> dict[str, Any]:
 	:param sphinx: The Sphinx application to register with.
 	:returns:      The extension's metadata.
 	"""
-	from pyTooling.GitLab import __version__
+	from pyTooling.GitLab                  import __version__
+	from pyTooling.GitLab.Sphinx.Reference import AutoInputs, Interface, ParameterTable
+	from pyTooling.GitLab.Sphinx.Reference import checkUndocumentedInputs
 
 	sphinx.setup_extension("pyTooling.Sphinx")
 
 	sphinx.add_domain(GitLabCIDomain)
+	sphinx.add_directive_to_domain("glci", "parameter-table", ParameterTable)
+	sphinx.add_directive_to_domain("glci", "interface", Interface)
+	sphinx.add_directive_to_domain("glci", "autoinputs", AutoInputs)
 
 	for configName, (default, rebuild, types) in GitLabCIDomain.configValues.items():
 		sphinx.add_config_value(f"{GitLabCIDomain.name}_{configName}", default, rebuild, types)
+
+	sphinx.connect("doctree-read", checkUndocumentedInputs)
 
 	return {"version": __version__, "parallel_read_safe": True, "parallel_write_safe": True}
