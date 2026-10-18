@@ -636,236 +636,6 @@ class PipelineFile(Base[None]):
 				ex.add_note(f"Stages: {', '.join(stages)}.")
 				raise ex
 
-@export
-class Variable(Base[Union[PipelineFile, "Job"]]):
-	"""
-	A CI/CD variable, declared in a ``variables`` key.
-
-	A default variable - declared in the top-level ``variables`` - may carry a :attr:`Description`, which makes GitLab
-	prefill it in the form running a pipeline by hand, and :attr:`Options` to select its value from.
-	"""
-
-	_PARENT_TYPE: ClassVar[ParentTypes] = PipelineFile  #: A variable is declared by a configuration file or a job.
-
-	_name:        str               #: Name of the variable.
-	_value:       Nullable[str]     #: Value of the variable.
-	_description: Nullable[str]     #: Description of the variable, shown when running a pipeline by hand.
-	_options:     tuple[str, ...]   #: Values to select from, when running a pipeline by hand.
-	_expand:      Nullable[bool]    #: ``False``, if variables in the value are not expanded.
-
-	_KEYS: ClassVar[tuple[str, ...]] = ("value", "description", "options", "expand")  #: Keys of a declaration as mapping.
-
-	def __init__(
-		self,
-		name:        str,
-		line:        int,
-		value:       Nullable[str]                      = None,
-		description: Nullable[str]                      = None,
-		options:     Nullable[Iterable[str]]            = None,
-		expand:      Nullable[bool]                     = None,
-		*,
-		parent:      Nullable[Union[PipelineFile, Job]] = None
-	) -> None:
-		"""
-		Initializes a variable.
-
-		:param name:        Name of the variable.
-		:param line:        Line the variable's name is written at, starting at 1.
-		:param value:       Optional, value of the variable. Default: ``None``.
-		:param description: Optional, description of the variable. Default: ``None``.
-		:param options:     Optional, values to select from when running a pipeline by hand. Default: ``None``.
-		:param expand:      Optional, ``False``, if variables in the value are not expanded. Default: ``None``, for a
-		                    variable that doesn't say.
-		:param parent:      Optional, reference to the configuration file or the job declaring the variable. Default:
-		                    ``None``.
-		:raises ValueError: If parameter 'name' is ``None``.
-		:raises TypeError:  If parameter 'name' is not of type :class:`str`.
-		:raises ValueError: If parameter 'name' is empty.
-		:raises TypeError:  If parameter 'value' is not of type :class:`str`.
-		:raises TypeError:  If parameter 'description' is not of type :class:`str`.
-		:raises TypeError:  If an element of parameter 'options' is not of type :class:`str`.
-		:raises TypeError:  If parameter 'expand' is not of type :class:`bool`.
-		"""
-		super().__init__(line, parent=parent)
-
-		if name is None:
-			raise ValueError("Parameter 'name' is None.")
-		elif not isinstance(name, str):
-			ex = TypeError("Parameter 'name' is not of type 'str'.")
-			ex.add_note(f"Got type '{getFullyQualifiedName(name)}'.")
-			raise ex
-		elif name == "":
-			raise ValueError("Parameter 'name' is empty.")
-
-		for parameterName, text in (
-			("value",       value),
-			("description", description)
-		):
-			if text is not None and not isinstance(text, str):
-				ex = TypeError(f"Parameter '{parameterName}' is not of type 'str'.")
-				ex.add_note(f"Got type '{getFullyQualifiedName(text)}'.")
-				raise ex
-
-		self._options = () if options is None else tuple(options)
-		for option in self._options:
-			if not isinstance(option, str):
-				ex = TypeError("An element of parameter 'options' is not of type 'str'.")
-				ex.add_note(f"Got type '{getFullyQualifiedName(option)}'.")
-				raise ex
-
-		if expand is not None and not isinstance(expand, bool):
-			ex = TypeError("Parameter 'expand' is not of type 'bool'.")
-			ex.add_note(f"Got type '{getFullyQualifiedName(expand)}'.")
-			raise ex
-
-		self._name =        name
-		self._value =       value
-		self._description = description
-		self._expand =      expand
-
-		if parent is not None:
-			parent._variables[name] = self
-
-	@readonly
-	def Name(self) -> str:
-		"""
-		Read-only property to access the variable's name (:attr:`_name`).
-
-		:returns: Name of the variable.
-		"""
-		return self._name
-
-	@readonly
-	def Value(self) -> Nullable[str]:
-		"""
-		Read-only property to access the variable's value (:attr:`_value`).
-
-		A value written as a number or a boolean is its text, as ``3.14`` or ``true``.
-
-		:returns: The value, or ``None`` if the declaration gives none.
-		"""
-		return self._value
-
-	@readonly
-	def Description(self) -> Nullable[str]:
-		"""
-		Read-only property to access the variable's description (:attr:`_description`).
-
-		:returns: The description, or ``None`` if the declaration gives none.
-		"""
-		return self._description
-
-	@readonly
-	def Options(self) -> tuple[str, ...]:
-		"""
-		Read-only property to access the values to select from, when running a pipeline by hand (:attr:`_options`).
-
-		:returns: The values, in the order the ``options`` key lists them.
-		"""
-		return self._options
-
-	@readonly
-	def Expand(self) -> Nullable[bool]:
-		"""
-		Read-only property to access whether variables in the value are expanded (:attr:`_expand`).
-
-		:returns: The ``expand`` key, or ``None`` if the declaration gives none - GitLab expands then.
-		"""
-		return self._expand
-
-	def __str__(self) -> str:
-		"""
-		Return the variable's name.
-
-		:returns: Name of the variable.
-		"""
-		return self._name
-
-	@classmethod
-	def _FromYAML(cls, name: str, declaration: Any, path: Path, line: int) -> Self:
-		"""
-		Read a variable's declaration: a value, or a mapping of the keys in :attr:`_KEYS`.
-
-		:param name:               Name of the variable.
-		:param declaration:        The declaration.
-		:param path:               Path to the configuration file.
-		:param line:               Line the variable's name is written at, starting at 1.
-		:returns:                  The variable.
-		:raises PipelineFileError: If the declaration is neither a value nor a mapping.
-		:raises PipelineFileError: If the mapping has a key GitLab doesn't know for a variable. |br|
-		                           The note lists the allowed keys.
-		:raises PipelineFileError: If key ``options`` is not a list of values, or key ``expand`` not a boolean.
-		"""
-		if declaration is None:
-			return cls(name, line)
-		elif isinstance(declaration, CommentedSeq):
-			ex = PipelineFileError(f"Variable '{name}' is neither a value nor a mapping.", path, line)
-			ex.add_note(f"Got type '{getFullyQualifiedName(declaration)}'.")
-			raise ex
-		elif not isinstance(declaration, CommentedMap):
-			return cls(name, line, Base._ToText(declaration))
-
-		for key in declaration:
-			if key not in cls._KEYS:
-				ex = PipelineFileError(f"Variable '{name}' has unknown key '{key}'.", path, Base._KeyLine(declaration, key))
-				ex.add_note(f"Allowed keys: {', '.join(cls._KEYS)}.")
-				raise ex
-
-		options = None
-		if (optionList := declaration.get("options", None)) is not None:
-			isList = isinstance(optionList, CommentedSeq)
-			if not isList or any(isinstance(item, (CommentedMap, CommentedSeq)) for item in optionList):
-				ex = PipelineFileError(
-					f"Key 'options' of variable '{name}' is not a list of values.", path, Base._KeyLine(declaration, "options")
-				)
-				ex.add_note(f"Got '{Base._ToPython(optionList)}'.")
-				raise ex
-
-			options = [Base._ToText(option) for option in optionList]
-
-		expand = Base._ToPython(declaration.get("expand", None))
-		if expand is not None and not isinstance(expand, bool):
-			ex = PipelineFileError(
-				f"Key 'expand' of variable '{name}' is not a boolean.", path, Base._KeyLine(declaration, "expand")
-			)
-			ex.add_note(f"Got '{expand}'.")
-			raise ex
-
-		value =       declaration.get("value", None)
-		description = declaration.get("description", None)
-
-		return cls(
-			name, line,
-			value=None if value is None else Base._ToText(value),
-			description=None if description is None else str(description),
-			options=options,
-			expand=expand
-		)
-
-	@classmethod
-	def _FromYAMLMapping(cls, mapping: Any, owner: Nullable[str], path: Path, line: int) -> list[Self]:
-		"""
-		Read the variables of a ``variables`` key.
-
-		:param mapping:            The key's value.
-		:param owner:              The element declaring the variables, for a message, as ``job 'build'``, or ``None``
-		                           for the top-level ``variables``.
-		:param path:               Path to the configuration file.
-		:param line:               Line the ``variables`` key is written at, starting at 1.
-		:returns:                  The variables, in file order.
-		:raises PipelineFileError: If the value is not a mapping.
-		:raises PipelineFileError: If a variable is malformed.
-		"""
-		if not isinstance(mapping, CommentedMap):
-			ex = PipelineFileError(
-				"Key 'variables' is not a mapping." if owner is None else f"Key 'variables' of {owner} is not a mapping.",
-				path, line
-			)
-			ex.add_note(f"Got type '{getFullyQualifiedName(mapping)}'.")
-			raise ex
-
-		return [cls._FromYAML(str(name), value, path, Base._KeyLine(mapping, name)) for name, value in mapping.items()]
-
 
 @export
 class Job(Base[PipelineFile]):
@@ -1286,4 +1056,232 @@ class Job(Base[PipelineFile]):
 		)
 
 
-Variable._PARENT_TYPE = (PipelineFile, Job)
+@export
+class Variable(Base[Union[PipelineFile, Job]]):
+	"""
+	A CI/CD variable, declared in a ``variables`` key.
+
+	A default variable - declared in the top-level ``variables`` - may carry a :attr:`Description`, which makes GitLab
+	prefill it in the form running a pipeline by hand, and :attr:`Options` to select its value from.
+	"""
+
+	_PARENT_TYPE: ClassVar[ParentTypes] = (PipelineFile, Job)  #: A variable is declared by a configuration file or a job.
+
+	_name:        str               #: Name of the variable.
+	_value:       Nullable[str]     #: Value of the variable.
+	_description: Nullable[str]     #: Description of the variable, shown when running a pipeline by hand.
+	_options:     tuple[str, ...]   #: Values to select from, when running a pipeline by hand.
+	_expand:      Nullable[bool]    #: ``False``, if variables in the value are not expanded.
+
+	_KEYS: ClassVar[tuple[str, ...]] = ("value", "description", "options", "expand")  #: Keys of a declaration as mapping.
+
+	def __init__(
+		self,
+		name:        str,
+		line:        int,
+		value:       Nullable[str]                      = None,
+		description: Nullable[str]                      = None,
+		options:     Nullable[Iterable[str]]            = None,
+		expand:      Nullable[bool]                     = None,
+		*,
+		parent:      Nullable[Union[PipelineFile, Job]] = None
+	) -> None:
+		"""
+		Initializes a variable.
+
+		:param name:        Name of the variable.
+		:param line:        Line the variable's name is written at, starting at 1.
+		:param value:       Optional, value of the variable. Default: ``None``.
+		:param description: Optional, description of the variable. Default: ``None``.
+		:param options:     Optional, values to select from when running a pipeline by hand. Default: ``None``.
+		:param expand:      Optional, ``False``, if variables in the value are not expanded. Default: ``None``, for a
+		                    variable that doesn't say.
+		:param parent:      Optional, reference to the configuration file or the job declaring the variable. Default:
+		                    ``None``.
+		:raises ValueError: If parameter 'name' is ``None``.
+		:raises TypeError:  If parameter 'name' is not of type :class:`str`.
+		:raises ValueError: If parameter 'name' is empty.
+		:raises TypeError:  If parameter 'value' is not of type :class:`str`.
+		:raises TypeError:  If parameter 'description' is not of type :class:`str`.
+		:raises TypeError:  If an element of parameter 'options' is not of type :class:`str`.
+		:raises TypeError:  If parameter 'expand' is not of type :class:`bool`.
+		"""
+		super().__init__(line, parent=parent)
+
+		if name is None:
+			raise ValueError("Parameter 'name' is None.")
+		elif not isinstance(name, str):
+			ex = TypeError("Parameter 'name' is not of type 'str'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(name)}'.")
+			raise ex
+		elif name == "":
+			raise ValueError("Parameter 'name' is empty.")
+
+		for parameterName, text in (
+			("value",       value),
+			("description", description)
+		):
+			if text is not None and not isinstance(text, str):
+				ex = TypeError(f"Parameter '{parameterName}' is not of type 'str'.")
+				ex.add_note(f"Got type '{getFullyQualifiedName(text)}'.")
+				raise ex
+
+		self._options = () if options is None else tuple(options)
+		for option in self._options:
+			if not isinstance(option, str):
+				ex = TypeError("An element of parameter 'options' is not of type 'str'.")
+				ex.add_note(f"Got type '{getFullyQualifiedName(option)}'.")
+				raise ex
+
+		if expand is not None and not isinstance(expand, bool):
+			ex = TypeError("Parameter 'expand' is not of type 'bool'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(expand)}'.")
+			raise ex
+
+		self._name =        name
+		self._value =       value
+		self._description = description
+		self._expand =      expand
+
+		if parent is not None:
+			parent._variables[name] = self
+
+	@readonly
+	def Name(self) -> str:
+		"""
+		Read-only property to access the variable's name (:attr:`_name`).
+
+		:returns: Name of the variable.
+		"""
+		return self._name
+
+	@readonly
+	def Value(self) -> Nullable[str]:
+		"""
+		Read-only property to access the variable's value (:attr:`_value`).
+
+		A value written as a number or a boolean is its text, as ``3.14`` or ``true``.
+
+		:returns: The value, or ``None`` if the declaration gives none.
+		"""
+		return self._value
+
+	@readonly
+	def Description(self) -> Nullable[str]:
+		"""
+		Read-only property to access the variable's description (:attr:`_description`).
+
+		:returns: The description, or ``None`` if the declaration gives none.
+		"""
+		return self._description
+
+	@readonly
+	def Options(self) -> tuple[str, ...]:
+		"""
+		Read-only property to access the values to select from, when running a pipeline by hand (:attr:`_options`).
+
+		:returns: The values, in the order the ``options`` key lists them.
+		"""
+		return self._options
+
+	@readonly
+	def Expand(self) -> Nullable[bool]:
+		"""
+		Read-only property to access whether variables in the value are expanded (:attr:`_expand`).
+
+		:returns: The ``expand`` key, or ``None`` if the declaration gives none - GitLab expands then.
+		"""
+		return self._expand
+
+	def __str__(self) -> str:
+		"""
+		Return the variable's name.
+
+		:returns: Name of the variable.
+		"""
+		return self._name
+
+	@classmethod
+	def _FromYAML(cls, name: str, declaration: Any, path: Path, line: int) -> Self:
+		"""
+		Read a variable's declaration: a value, or a mapping of the keys in :attr:`_KEYS`.
+
+		:param name:               Name of the variable.
+		:param declaration:        The declaration.
+		:param path:               Path to the configuration file.
+		:param line:               Line the variable's name is written at, starting at 1.
+		:returns:                  The variable.
+		:raises PipelineFileError: If the declaration is neither a value nor a mapping.
+		:raises PipelineFileError: If the mapping has a key GitLab doesn't know for a variable. |br|
+		                           The note lists the allowed keys.
+		:raises PipelineFileError: If key ``options`` is not a list of values, or key ``expand`` not a boolean.
+		"""
+		if declaration is None:
+			return cls(name, line)
+		elif isinstance(declaration, CommentedSeq):
+			ex = PipelineFileError(f"Variable '{name}' is neither a value nor a mapping.", path, line)
+			ex.add_note(f"Got type '{getFullyQualifiedName(declaration)}'.")
+			raise ex
+		elif not isinstance(declaration, CommentedMap):
+			return cls(name, line, Base._ToText(declaration))
+
+		for key in declaration:
+			if key not in cls._KEYS:
+				ex = PipelineFileError(f"Variable '{name}' has unknown key '{key}'.", path, Base._KeyLine(declaration, key))
+				ex.add_note(f"Allowed keys: {', '.join(cls._KEYS)}.")
+				raise ex
+
+		options = None
+		if (optionList := declaration.get("options", None)) is not None:
+			isList = isinstance(optionList, CommentedSeq)
+			if not isList or any(isinstance(item, (CommentedMap, CommentedSeq)) for item in optionList):
+				ex = PipelineFileError(
+					f"Key 'options' of variable '{name}' is not a list of values.", path, Base._KeyLine(declaration, "options")
+				)
+				ex.add_note(f"Got '{Base._ToPython(optionList)}'.")
+				raise ex
+
+			options = [Base._ToText(option) for option in optionList]
+
+		expand = Base._ToPython(declaration.get("expand", None))
+		if expand is not None and not isinstance(expand, bool):
+			ex = PipelineFileError(
+				f"Key 'expand' of variable '{name}' is not a boolean.", path, Base._KeyLine(declaration, "expand")
+			)
+			ex.add_note(f"Got '{expand}'.")
+			raise ex
+
+		value =       declaration.get("value", None)
+		description = declaration.get("description", None)
+
+		return cls(
+			name, line,
+			value=None if value is None else Base._ToText(value),
+			description=None if description is None else str(description),
+			options=options,
+			expand=expand
+		)
+
+	@classmethod
+	def _FromYAMLMapping(cls, mapping: Any, owner: Nullable[str], path: Path, line: int) -> list[Self]:
+		"""
+		Read the variables of a ``variables`` key.
+
+		:param mapping:            The key's value.
+		:param owner:              The element declaring the variables, for a message, as ``job 'build'``, or ``None``
+		                           for the top-level ``variables``.
+		:param path:               Path to the configuration file.
+		:param line:               Line the ``variables`` key is written at, starting at 1.
+		:returns:                  The variables, in file order.
+		:raises PipelineFileError: If the value is not a mapping.
+		:raises PipelineFileError: If a variable is malformed.
+		"""
+		if not isinstance(mapping, CommentedMap):
+			ex = PipelineFileError(
+				"Key 'variables' is not a mapping." if owner is None else f"Key 'variables' of {owner} is not a mapping.",
+				path, line
+			)
+			ex.add_note(f"Got type '{getFullyQualifiedName(mapping)}'.")
+			raise ex
+
+		return [cls._FromYAML(str(name), value, path, Base._KeyLine(mapping, name)) for name, value in mapping.items()]
