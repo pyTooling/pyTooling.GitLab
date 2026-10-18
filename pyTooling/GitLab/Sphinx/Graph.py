@@ -62,7 +62,7 @@ from docutils.parsers.rst            import directives
 from sphinx.application              import Sphinx
 from sphinx.ext.graphviz             import align_spec, figure_wrapper, graphviz
 
-from pyTooling.CI                    import Base as CIBase, Matrix as CIMatrix, Workflow as CIWorkflow
+from pyTooling.CI                    import Base as CIBase, Matrix as CIMatrix, RuleOutcome, Workflow as CIWorkflow
 from pyTooling.Common                import getFullyQualifiedName
 from pyTooling.Decorators            import export, readonly
 from pyTooling.Graph                 import Vertex
@@ -112,8 +112,8 @@ class PipelineDotGraph(metaclass=ExtendedType, slots=True):
 	* a job running a script is a box with square corners, labelled with its name and stage;
 	* a trigger job starting a child pipeline is a rounded box, labelled with the child pipeline's files; one starting
 	  another project's pipeline is a white rounded box, labelled with the project - it is never expanded;
-	* a job with a condition - its single ``rules:if`` - is dashed, and its tooltip is the condition; a manual job is
-	  dashed too, and labelled *manual*;
+	* a job whose rules have conditions - ``rules:if`` - is dashed, and its tooltip lists them, one per rule; a manual
+	  job is dashed too, and labelled *manual*;
 	* a job with ``parallel`` is a cluster of its instances, labelled with the matrix' dimensions or the count of
 	  instances.
 
@@ -275,9 +275,8 @@ class PipelineDotGraph(metaclass=ExtendedType, slots=True):
 
 		:param element: The job, matrix or trigger job to describe.
 		:returns:       The label's lines below the element's name, the style's parts, and the tooltip - the pipeline
-		                started and the condition, one per line, or an empty string.
+		                started and the rules' conditions, one per line, or an empty string.
 		"""
-		from pyTooling.GitLab.PipelineFile import When
 
 		job = element.Definition
 		lines =   [] if isinstance(element.Parent, CIMatrix) else [f"stage: {job.Stage}"]
@@ -300,14 +299,16 @@ class PipelineDotGraph(metaclass=ExtendedType, slots=True):
 			else:
 				lines.append(f"parallel: {parallel.Count}")
 
-		if job.When is When.Manual:
+		if job.When is RuleOutcome.Manual:
 			lines.append("manual")
 			style.append("dashed")
 
-		if (condition := element.Condition) is not None:
+		conditions = [rule.Condition for rule in element.Rules if rule.Condition is not None]
+		if len(conditions) > 0:
 			if "dashed" not in style:
 				style.append("dashed")
-			tooltip.append(f"if: {condition}")
+
+			tooltip.extend(f"if: {condition}" for condition in conditions)
 
 		return lines, style, "\n".join(tooltip)
 

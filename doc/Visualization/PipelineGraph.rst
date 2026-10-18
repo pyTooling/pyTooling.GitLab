@@ -16,8 +16,8 @@ so the domain has to be enabled - see :ref:`GLCI`.
 
       * a job is a node labelled with its name and its stage;
       * a job running a script is a grey box with square corners;
-      * a job with a condition - its ``rules:if`` - is dashed, and in HTML its tooltip is the condition; a manual job is
-        dashed and labelled *manual*;
+      * a job whose rules have conditions - ``rules:if`` - is dashed, and in HTML its tooltip lists them, one per rule;
+        a manual job is dashed and labelled *manual*;
       * a job with ``parallel:matrix`` is a cluster of its instances, labelled with the matrix' dimensions; one with
         ``parallel: N`` with the count;
       * a trigger job starting another project's pipeline is a white leaf naming that project;

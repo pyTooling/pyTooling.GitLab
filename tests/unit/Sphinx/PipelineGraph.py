@@ -90,6 +90,7 @@ PIPELINE = dedent("""\
 	  needs: [Build]
 	  rules:
 	    - if: '$CI_COMMIT_TAG'
+	    - if: '$CI_PIPELINE_SOURCE == "web"'
 	  script: [sphinx]
 
 	Child:
@@ -178,19 +179,20 @@ class Nodes(Testcase):
 		self.assertIn("stage: build", build)
 		self.assertIn('style="filled", fillcolor="#f2f2f2"', build)
 
-	@testcase("Condition")
-	def Condition(self) -> None:
+	@testcase("Rules")
+	def Rules(self) -> None:
 		"""
-		A job with a condition is dashed, and its tooltip is the condition.
+		A job whose rules have conditions is dashed, and its tooltip lists them, one per rule.
 
-		Reads the node of 'Docs'.
+		Reads the nodes of 'Docs' and 'Build'.
 		"""
 		with TemporaryDirectory() as directory:
 			code = draw(directory)
 
 		docs = line(code, '"Docs" [')
 		self.assertIn('style="filled,dashed"', docs)
-		self.assertIn('tooltip="if: $CI_COMMIT_TAG"', docs)
+		self.assertIn('tooltip="if: $CI_COMMIT_TAG\\nif: $CI_PIPELINE_SOURCE == \\"web\\""', docs)
+		self.assertNotIn("dashed", line(code, '"Build" ['))
 
 	@testcase("Other project's pipeline")
 	def Downstream(self) -> None:
