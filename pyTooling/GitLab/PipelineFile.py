@@ -72,7 +72,7 @@ from ruamel.yaml.scalarint    import ScalarInt
 from ruamel.yaml.scalarstring import ScalarString
 
 
-__all__ = ["ValueT", "RESERVED_KEYS", "DEFAULT_STAGES"]
+__all__ = ["ValueT", "RESERVED_KEYS", "DEFAULT_STAGES", "MAX_EXTENDS_DEPTH", "MAX_REFERENCE_DEPTH"]
 
 ValueT = Union[str, bool, int, float, None, list["ValueT"], dict[str, "ValueT"]]
 """A value read from a configuration file, converted to plain Python types."""
@@ -90,6 +90,12 @@ RESERVED_KEYS = frozenset((
 
 DEFAULT_STAGES = ("build", "test", "deploy")
 """Stages of a pipeline, whose configuration declares no ``stages``, between ``.pre`` and ``.post``."""
+
+MAX_EXTENDS_DEPTH = 11
+"""How many levels of ``extends`` GitLab resolves."""
+
+MAX_REFERENCE_DEPTH = 10
+"""How many levels of ``!reference`` tags GitLab resolves."""
 
 
 @export
@@ -681,6 +687,10 @@ class PipelineFile(Base[None]):
 		                           attached.
 		:raises PipelineFileError: If key ``stages`` is not a list.
 		:raises PipelineFileError: If key ``variables``, ``workflow`` or a job is not a mapping.
+		:raises PipelineFileError: If a job extends a job, or a ``!reference`` tag refers to a key, the file doesn't have,
+		                           though it includes no files.
+		:raises PipelineFileError: If jobs extend each other in a cycle, or ``extends`` or ``!reference`` tags nest too
+		                           deep.
 		:raises PipelineFileError: If a key of a variable, a job, the workflow or an include holds a value of the wrong
 		                           kind.
 		"""
@@ -698,18 +708,8 @@ class PipelineFile(Base[None]):
 			variables = Variable._FromYAMLMapping(document["variables"], None, path, Base._KeyLine(document, "variables"))
 
 		jobs = []
-		for name, job in document.items():
-			name = str(name)
-			if name in RESERVED_KEYS:
-				continue
-
-			line = Base._KeyLine(document, name)
-			if not isinstance(job, CommentedMap):
-				ex = PipelineFileError(f"Job '{name}' is not a mapping.", path, line)
-				ex.add_note(f"Got type '{getFullyQualifiedName(job)}'.")
-				raise ex
-
-			jobs.append(Job._FromYAML(name, job, path, line))
+		for name, (mapping, unresolved) in cls._ResolveJobs(document, path).items():
+			jobs.append(Job._FromYAML(name, mapping, path, Base._KeyLine(document, name), unresolved))
 
 		workflow = None
 		if "workflow" in document:
@@ -722,6 +722,205 @@ class PipelineFile(Base[None]):
 		default = Default._FromYAML(document, path)
 
 		return cls(path, stages, variables, jobs, workflow, includes, default)
+
+	@classmethod
+	def _ResolveJobs(cls, document: CommentedMap, path: Path) -> dict[str, tuple[CommentedMap, list[str]]]:
+		"""
+		Resolve the ``!reference`` tags, the ``extends`` and the ``default`` of every job, as GitLab merges them.
+
+		A ``!reference`` tag is replaced by the value it refers to; one in a list of a list's items is spliced into it.
+		A job's mapping is the deep merge of the jobs it extends, in order, and of its own keys: mappings merge, other
+		values - lists included - replace, and ``null`` removes a key. A job then gets every key of ``default``, and of
+		the global keywords standing for it, which it doesn't set, unless ``inherit.default`` says otherwise.
+
+		Every key keeps the line it is written at. What a job refers to, but the file doesn't have, is an error - unless
+		the file includes files, which may have it: then it is skipped and reported in the job's ``unresolved`` list.
+
+		:param document:           The configuration.
+		:param path:               Path to the configuration file.
+		:returns:                  Every job's merged mapping, and what it refers to but the file doesn't have, by name, in
+		                           file order.
+		:raises PipelineFileError: If a job is not a mapping.
+		:raises PipelineFileError: If a job extends a job, or a ``!reference`` tag refers to a key, the file doesn't have,
+		                           though it includes no files.
+		:raises PipelineFileError: If jobs extend each other in a cycle, or ``extends`` or ``!reference`` tags nest too
+		                           deep.
+		"""
+		hasIncludes = "include" in document
+		unresolved: dict[str, list[str]] = {}
+
+		def resolve(value: Any, owner: Nullable[str], depth: int) -> Any:
+			"""
+			Nested function for recursion, resolving the ``!reference`` tags in a value.
+
+			:param value:              The value.
+			:param owner:              Name of the job the value belongs to, or ``None`` for ``default``.
+			:param depth:              How many references were followed to reach the value.
+			:returns:                  The resolved value, or ``None`` for a reference of a job the file can't resolve.
+			:raises PipelineFileError: If a reference can't be resolved, though the file includes no files, or it is in
+			                           ``default``.
+			:raises PipelineFileError: If references nest deeper than :data:`MAX_REFERENCE_DEPTH` levels.
+			"""
+			if isinstance(value, CommentedSeq) and value.tag.value == "!reference":
+				segments = ", ".join(str(segment) for segment in value)
+				where = "the default" if owner is None else f"job '{owner}'"
+				if depth >= MAX_REFERENCE_DEPTH:
+					raise PipelineFileError(
+						f"Reference [{segments}] of {where} nests more than {MAX_REFERENCE_DEPTH} levels.", path, value.lc.line + 1
+					)
+
+				target: Any = document
+				for segment in (str(segment) for segment in value):
+					if not isinstance(target, CommentedMap) or segment not in target:
+						if not hasIncludes or owner is None:
+							raise PipelineFileError(
+								f"Reference [{segments}] of {where} refers to a key the file doesn't have.", path, value.lc.line + 1
+							)
+
+						unresolved.setdefault(owner, []).append(f"!reference [{segments}]")
+						return None
+
+					target = target[segment]
+
+				return resolve(target, owner, depth + 1)
+			elif isinstance(value, CommentedSeq):
+				items = CommentedSeq()
+				items.lc.line = value.lc.line
+				for index, item in enumerate(value):
+					isReference = isinstance(item, CommentedSeq) and item.tag.value == "!reference"
+					resolved = resolve(item, owner, depth)
+					if isReference and resolved is None:
+						continue
+					elif isReference and isinstance(resolved, CommentedSeq):
+						for position, element in enumerate(resolved):
+							items.append(element)
+							items.lc.add_kv_line_col(len(items) - 1, resolved.lc.data[position])
+					else:
+						items.append(resolved)
+						items.lc.add_kv_line_col(len(items) - 1, value.lc.data[index])
+
+				return items
+			elif isinstance(value, CommentedMap):
+				for key in list(value):
+					isReference = isinstance(value[key], CommentedSeq) and value[key].tag.value == "!reference"
+					resolved = resolve(value[key], owner, depth)
+					if resolved is None and isReference:
+						del value[key]
+					else:
+						value[key] = resolved
+
+			return value
+
+		def merge(target: CommentedMap, source: CommentedMap) -> None:
+			"""
+			Nested function for recursion, merging a mapping deeply into another, keeping each key's line.
+
+			:param target: The mapping merged into.
+			:param source: The mapping merged.
+			"""
+			for key, value in source.items():
+				if value is None:
+					target.pop(key, None)
+					continue
+				elif isinstance(value, CommentedMap) and isinstance(target.get(key, None), CommentedMap):
+					merged = copy(target[key])
+					merge(merged, value)
+					value = merged
+
+				target[key] = value
+				if key in (source.lc.data or {}):
+					target.lc.add_kv_line_col(key, source.lc.data[key])
+
+		def copy(mapping: CommentedMap) -> CommentedMap:
+			"""
+			Nested function copying a mapping with the lines of its keys.
+
+			:param mapping: The mapping.
+			:returns:       The copy.
+			"""
+			result = CommentedMap(mapping)
+			result.lc.line = mapping.lc.line
+			result.lc.col = mapping.lc.col
+			for key in mapping:
+				if key in (mapping.lc.data or {}):
+					result.lc.add_kv_line_col(key, mapping.lc.data[key])
+
+			return result
+
+		mappings: dict[str, CommentedMap] = {}
+		for name, job in document.items():
+			name = str(name)
+			if name in RESERVED_KEYS:
+				continue
+			elif not isinstance(job, CommentedMap):
+				ex = PipelineFileError(f"Job '{name}' is not a mapping.", path, Base._KeyLine(document, name))
+				ex.add_note(f"Got type '{getFullyQualifiedName(job)}'.")
+				raise ex
+
+			mappings[name] = resolve(job, name, 0)
+
+		defaults = CommentedMap()
+		if isinstance(document.get("default", None), CommentedMap):
+			defaults = copy(resolve(document["default"], None, 0))
+
+		for key in Default._KEYS:
+			if key in document and key not in defaults:
+				defaults[key] = document[key]
+				defaults.lc.add_kv_line_col(key, document.lc.data[key])
+
+		def extended(name: str, chain: tuple[str, ...]) -> CommentedMap:
+			"""
+			Nested function for recursion, merging the jobs a job extends and its own keys.
+
+			:param name:               Name of the job.
+			:param chain:              Names of the jobs extending this one, outermost first.
+			:returns:                  The merged mapping.
+			:raises PipelineFileError: If a job extends a job the file doesn't have, though it includes no files.
+			:raises PipelineFileError: If jobs extend each other in a cycle, or nest deeper than
+			                           :data:`MAX_EXTENDS_DEPTH` levels.
+			"""
+			own = mappings[name]
+			names = own.get("extends", ())
+			names = [names] if isinstance(names, str) else list(names)
+			result = CommentedMap()
+			result.lc.line = own.lc.line
+			result.lc.col = own.lc.col
+			for base in (str(base) for base in names):
+				if base in chain or base == name:
+					cycle = " -> ".join((*chain, name, base))
+					raise PipelineFileError(f"Jobs extend each other in a cycle: {cycle}.", path, Base._KeyLine(document, name))
+				elif len(chain) >= MAX_EXTENDS_DEPTH:
+					raise PipelineFileError(
+						f"Job '{name}' extends more than {MAX_EXTENDS_DEPTH} levels.", path, Base._KeyLine(document, name)
+					)
+				elif base not in mappings:
+					if not hasIncludes:
+						raise PipelineFileError(
+							f"Job '{name}' extends job '{base}', which the file doesn't have.", path, Base._KeyLine(own, "extends")
+						)
+
+					unresolved.setdefault(chain[0] if len(chain) > 0 else name, []).append(f"extends {base}")
+					continue
+
+				merge(result, extended(base, (*chain, name)))
+
+			merge(result, own)
+			return result
+
+		resolved = {}
+		for name in mappings:
+			mapping = extended(name, ())
+			inherit = mapping.get("inherit", None)
+			inherited = inherit.get("default", True) if isinstance(inherit, CommentedMap) else True
+			if not name.startswith(".") and inherited is not False:
+				for key, value in defaults.items():
+					if key not in mapping and (inherited is True or key in inherited):
+						mapping[key] = value
+						mapping.lc.add_kv_line_col(key, defaults.lc.data[key])
+
+			resolved[name] = (mapping, unresolved.get(name, []))
+
+		return resolved
 
 	def _Validate(self) -> None:
 		"""
@@ -830,6 +1029,8 @@ class Job(Base[PipelineFile]):
 	_tags:             tuple[str, ...]       #: Tags selecting the runner.
 	_environment:      Nullable[str]         #: Name of the environment the job deploys to.
 	_variables:        dict[str, Variable]   #: Variables of the job, by name, in file order.
+	_extends:          tuple[str, ...]       #: Names of the jobs this job extends.
+	_unresolved:       tuple[str, ...]       #: What the job refers to, but its file doesn't have.
 
 	def __init__(
 		self,
@@ -849,6 +1050,8 @@ class Job(Base[PipelineFile]):
 		environment:      Nullable[str]                = None,
 		variables:        Nullable[Iterable[Variable]] = None,
 		rules:            Nullable[Iterable[Rule]]     = None,
+		extends:          Nullable[Iterable[str]]      = None,
+		unresolved:       Nullable[Iterable[str]]      = None,
 		*,
 		parent:           Nullable[PipelineFile]       = None
 	) -> None:
@@ -875,6 +1078,9 @@ class Job(Base[PipelineFile]):
 		:param variables:        Optional, variables of the job, which are attached to the job. Default: ``None``.
 		:param rules:            Optional, rules deciding whether the job is added to a pipeline, which are attached to
 		                         the job. Default: ``None``.
+		:param extends:          Optional, names of the jobs this job extends. Default: ``None``.
+		:param unresolved:       Optional, what the job refers to with ``extends`` or a ``!reference`` tag, but its file
+		                         doesn't have. Default: ``None``.
 		:param parent:           Optional, reference to the configuration file containing the job. Default: ``None``.
 		:raises ValueError:      If parameter 'name' or 'stage' is ``None``.
 		:raises TypeError:       If parameter 'name' or 'stage' is not of type :class:`str`.
@@ -883,8 +1089,8 @@ class Job(Base[PipelineFile]):
 		:raises TypeError:       If parameter 'allowFailure' is not of type :class:`bool`.
 		:raises TypeError:       If parameter 'image' or 'environment' is not of type :class:`str`.
 		:raises TypeError:       If an element of parameter 'allowedExitCodes' is not of type :class:`int`.
-		:raises TypeError:       If an element of parameter 'script', 'beforeScript', 'afterScript', 'services' or
-		                         'tags' is not of type :class:`str`.
+		:raises TypeError:       If an element of parameter 'script', 'beforeScript', 'afterScript', 'services', 'tags',
+		                         'extends' or 'unresolved' is not of type :class:`str`.
 		:raises TypeError:       If an element of parameter 'needs' is not of type :class:`Need`.
 		:raises TypeError:       If an element of parameter 'variables' is not of type :class:`Variable`.
 		:raises TypeError:       If an element of parameter 'rules' is not of type :class:`Rule`.
@@ -935,12 +1141,16 @@ class Job(Base[PipelineFile]):
 		self._afterScript =  () if afterScript is None else tuple(afterScript)
 		self._services =     () if services is None else tuple(services)
 		self._tags =         () if tags is None else tuple(tags)
+		self._extends =      () if extends is None else tuple(extends)
+		self._unresolved =   () if unresolved is None else tuple(unresolved)
 		for parameterName, texts in (
 			("script",       self._script),
 			("beforeScript", self._beforeScript),
 			("afterScript",  self._afterScript),
 			("services",     self._services),
-			("tags",         self._tags)
+			("tags",         self._tags),
+			("extends",      self._extends),
+			("unresolved",   self._unresolved)
 		):
 			for text in texts:
 				if not isinstance(text, str):
@@ -1022,6 +1232,29 @@ class Job(Base[PipelineFile]):
 		:returns: ``True``, if the job's name starts with a dot.
 		"""
 		return self._name.startswith(".")
+
+	@readonly
+	def Extends(self) -> tuple[str, ...]:
+		"""
+		Read-only property to access the names of the jobs this job extends (:attr:`_extends`).
+
+		The job's keys are the merge of theirs and its own already.
+
+		:returns: The names, in the order ``extends`` lists them.
+		"""
+		return self._extends
+
+	@readonly
+	def Unresolved(self) -> tuple[str, ...]:
+		"""
+		Read-only property to access what the job refers to, but its file doesn't have (:attr:`_unresolved`).
+
+		A file including other files may extend or refer to their jobs; then the job lacks what they contribute.
+
+		:returns: The jobs it extends and the ``!reference`` tags, as ``extends .base`` and ``!reference [.setup,
+		          script]``, or an empty tuple if the job is complete.
+		"""
+		return self._unresolved
 
 	@readonly
 	def Stage(self) -> str:
@@ -1213,14 +1446,22 @@ class Job(Base[PipelineFile]):
 		return None if value is None else Base._ToText(value)
 
 	@classmethod
-	def _FromYAML(cls, name: str, mapping: CommentedMap, path: Path, line: int) -> Self:
+	def _FromYAML(
+		cls,
+		name:       str,
+		mapping:    CommentedMap,
+		path:       Path,
+		line:       int,
+		unresolved: Nullable[Iterable[str]] = None
+	) -> Self:
 		"""
 		Build a job and the elements it contains from its mapping in the configuration file.
 
 		:param name:               Name of the job.
-		:param mapping:            The job's mapping.
+		:param mapping:            The job's mapping, merged with the jobs it extends and the default.
 		:param path:               Path to the configuration file.
 		:param line:               Line the job's name is written at, starting at 1.
+		:param unresolved:         Optional, what the job refers to, but the file doesn't have. Default: ``None``.
 		:returns:                  The job.
 		:raises PipelineFileError: If key ``when`` is not a value GitLab knows. |br|
 		                           The note lists the allowed values.
@@ -1286,6 +1527,8 @@ class Job(Base[PipelineFile]):
 		if "rules" in mapping:
 			rules = Rule._FromYAMLEntries(mapping["rules"], f"job '{name}'", path, Base._KeyLine(mapping, "rules"))
 
+		extends = mapping.get("extends", ())
+		extends = [extends] if isinstance(extends, str) else extends
 		stage = mapping.get("stage", None)
 
 		return cls(
@@ -1303,7 +1546,9 @@ class Job(Base[PipelineFile]):
 			tags=tags,
 			environment=cls._Name(mapping.get("environment", None)),
 			variables=variables,
-			rules=rules
+			rules=rules,
+			extends=[Base._ToText(base) for base in extends],
+			unresolved=unresolved
 		)
 
 

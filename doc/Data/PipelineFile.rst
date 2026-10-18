@@ -226,6 +226,31 @@ global keywords ``image``, ``services``, ``before_script`` and ``after_script``,
 read into it too, unless ``default`` sets them.
 
 
+.. _DATA/PipelineFile/Extends:
+
+Extends, References and Defaults
+********************************
+
+A job's keys are merged as GitLab merges them, before the job is built:
+
+* ``!reference`` tags are replaced by what they refer to - in a list, a referred list is spliced in, as in
+  ``script: [!reference [.setup, script], make]``. References nest up to 10 levels
+  (:data:`~pyTooling.GitLab.PipelineFile.MAX_REFERENCE_DEPTH`).
+* ``extends`` merges the jobs a job extends, in order, and then its own keys: mappings merge deeply, other values -
+  lists included - replace, and ``null`` removes a key. Jobs extend each other up to 11 levels
+  (:data:`~pyTooling.GitLab.PipelineFile.MAX_EXTENDS_DEPTH`). :attr:`~pyTooling.GitLab.PipelineFile.Job.Extends` keeps
+  the names.
+* A job gets every key of ``default``, and of the global keywords standing for it, which it doesn't set - unless
+  ``inherit.default`` is ``false``, or lists the keys it inherits. Hidden jobs get none.
+
+Every key keeps the line it is written at, also when another job contributes it.
+
+A file may extend, or refer to, jobs of the files it includes, which aren't read. Then a missing job or key isn't an
+error: the job is built from what the file has, and :attr:`~pyTooling.GitLab.PipelineFile.Job.Unresolved` names what
+it lacks, as ``extends .template`` or ``!reference [.setup, script]``. A file including no files must have everything
+it refers to.
+
+
 .. _DATA/PipelineFile/Lines:
 
 Source Lines
