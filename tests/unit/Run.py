@@ -38,7 +38,8 @@ from typing                import Any
 from unittest              import mock
 
 from pyTooling.CI          import Matrix, Outcome
-from pyTooling.GitLab      import GitLabError, Job, MatrixJob, Pipeline, PipelineGroup, ProjectClient, Source, Status
+from pyTooling.GitLab      import DownstreamPipeline, GitLabError, Job, MatrixDownstreamPipeline, MatrixJob, Pipeline
+from pyTooling.GitLab      import PipelineGroup, ProjectClient, Source, Status
 from pyTooling.GitLab      import STATUS_TO_OUTCOME
 from pyTooling.REST        import RESTError
 from pyTooling.Testing     import Testcase, testsuite, testcase
@@ -727,15 +728,15 @@ class Pipelines(Testcase):
 		"""
 		with self.assertRaises(ValueError) as context:
 			PipelineGroup(None)
-		self.assertEqual("Parameter 'sha' is None.", str(context.exception))
+		self.assertEqual("Parameter 'name' is None.", str(context.exception))
 
 		with self.assertRaises(TypeError) as context:
 			PipelineGroup(1)
-		self.assertEqual("Parameter 'sha' is not of type 'str'.", str(context.exception))
+		self.assertEqual("Parameter 'name' is not of type 'str'.", str(context.exception))
 
 		with self.assertRaises(ValueError) as context:
 			PipelineGroup("")
-		self.assertEqual("Parameter 'sha' is empty.", str(context.exception))
+		self.assertEqual("Parameter 'name' is empty.", str(context.exception))
 
 
 @testsuite("Recorded pipelines")
@@ -778,3 +779,319 @@ class Recordings(Testcase):
 			[str(job) for job in instances]
 		)
 		self.assertEqual({"CI_NODE_INDEX": "3", "CI_NODE_TOTAL": "4"}, instances[2].Dimensions)
+
+
+def _bridge(**fields: Any) -> dict[str, Any]:
+	"""
+	Build a successful trigger job, which started a child pipeline.
+
+	:param fields: Fields overriding the defaults.
+	:returns:      The trigger job, as the GitLab REST API lists it.
+	"""
+	bridge = {
+		"id": 200, "name": "child", "stage": "deploy", "status": "success", "allow_failure": False,
+		"created_at": _time(100), "started_at": _time(110), "finished_at": _time(120), "queued_duration": 0.5,
+		"web_url": "https://gitlab.com/group/project/-/jobs/200",
+		"pipeline": {"id": 4711, "project_id": 99},
+		"downstream_pipeline": {
+			"id": 4800, "project_id": 99, "status": "success", "created_at": _time(112), "updated_at": _time(400),
+			"web_url": "https://gitlab.com/group/project/-/pipelines/4800"
+		}
+	}
+	bridge.update(fields)
+
+	return bridge
+
+
+@testsuite("Downstream pipelines")
+class Downstream(Testcase):
+	"""Trigger jobs and the downstream pipelines they started."""
+
+	@testcase("Child pipeline")
+	def Child(self) -> None:
+		"""
+		A trigger job becomes a downstream pipeline holding the child pipeline's jobs, which reports the child pipeline's
+		own status, URL and times.
+
+		Parses a pipeline with a trigger job and the child pipeline's payloads.
+		"""
+		pipeline = Pipeline.Parse(_pipeline(), [_job()], [_bridge()], {
+			4800: {
+				"pipeline": _pipeline(
+					id=4800, status="failed", created_at=_time(115), started_at=_time(125), finished_at=_time(320),
+					web_url="https://gitlab.com/group/project/-/pipelines/4800"
+				),
+				"jobs": [_job(id=300, name="unit", status="failed", started_at=_time(130), finished_at=_time(300))]
+			}
+		})
+		child = pipeline.Workflows["child"]
+
+		self.assertIsInstance(child, DownstreamPipeline)
+		self.assertIs(Status.Failed, child.Status)
+		self.assertIs(Outcome.Failure, child.Outcome)
+		self.assertEqual("https://gitlab.com/group/project/-/pipelines/4800", str(child.URL))
+		self.assertEqual(_datetime(115), child.CreatedAt)
+		self.assertEqual(_datetime(125), child.StartedAt)
+		self.assertEqual(_datetime(320), child.CompletedAt)
+		self.assertEqual(200, child.ID)
+		self.assertEqual("deploy", child.Stage)
+		self.assertIs(Status.Success, child.TriggerStatus)
+		self.assertEqual("https://gitlab.com/group/project/-/jobs/200", str(child.TriggerURL))
+		self.assertEqual(4800, child.DownstreamID)
+		self.assertEqual(99, child.DownstreamProjectID)
+		self.assertFalse(child.IsMultiProject)
+		self.assertIsNone(child.Reference)
+		self.assertEqual("child / unit", child.Jobs[0].QualifiedName)
+		self.assertIs(pipeline, child.Jobs[0].Pipeline)
+		self.assertEqual(2, len(list(pipeline.IterateJobs())))
+
+	@testcase("Without the downstream payload")
+	def Summary(self) -> None:
+		"""
+		A downstream pipeline whose payloads weren't read reports GitLab's summary of it: its creation, and its last update
+		as its completion once it ended - but no start - and has no contents.
+
+		Parses a trigger job without a downstream payload.
+		"""
+		child = Pipeline.Parse(_pipeline(), None, [_bridge()]).Workflows["child"]
+
+		self.assertEqual(0, child.ElementCount)
+		self.assertEqual(_datetime(112), child.CreatedAt)
+		self.assertIsNone(child.StartedAt)
+		self.assertEqual(_datetime(400), child.CompletedAt)
+		self.assertIs(Outcome.Success, child.Outcome)
+		self.assertEqual("https://gitlab.com/group/project/-/pipelines/4800", str(child.URL))
+
+	@testcase("Running downstream pipeline")
+	def Running(self) -> None:
+		"""
+		A downstream pipeline still running has no completion, though GitLab reports its last update.
+
+		Parses a trigger job, whose downstream pipeline is running.
+		"""
+		summary = {"id": 4800, "project_id": 99, "status": "running", "created_at": _time(112), "updated_at": _time(400)}
+		child = Pipeline.Parse(_pipeline(), None, [_bridge(downstream_pipeline=summary)]).Workflows["child"]
+
+		self.assertIs(Status.Running, child.Status)
+		self.assertIsNone(child.CompletedAt)
+		self.assertIsNone(child.Outcome)
+
+	@testcase("Multi-project pipeline")
+	def MultiProject(self) -> None:
+		"""
+		A downstream pipeline of another project names that project as its reference, and reports its own status.
+
+		Parses a trigger job, whose downstream pipeline failed, while the trigger job succeeded.
+		"""
+		child = Pipeline.Parse(_pipeline(), None, [_bridge(downstream_pipeline={
+			"id": 5000, "project_id": 7, "status": "failed", "created_at": _time(112), "updated_at": _time(400),
+			"web_url": "https://gitlab.com/gitlab-org/gitlab/-/pipelines/5000"
+		})]).Workflows["child"]
+
+		self.assertTrue(child.IsMultiProject)
+		self.assertEqual("gitlab-org/gitlab", child.Reference)
+		self.assertIs(Status.Failed, child.Status)
+		self.assertIs(Status.Success, child.TriggerStatus)
+
+	@testcase("Not started")
+	def NotStarted(self) -> None:
+		"""
+		A manual trigger job hasn't started a pipeline yet: no status, no outcome, no times.
+
+		Parses a trigger job without a downstream pipeline.
+		"""
+		child = Pipeline.Parse(_pipeline(), None, [_bridge(status="manual", downstream_pipeline=None)]).Workflows["child"]
+
+		self.assertIsNone(child.DownstreamID)
+		self.assertIsNone(child.IsMultiProject)
+		self.assertIsNone(child.Status)
+		self.assertIsNone(child.Outcome)
+		self.assertIsNone(child.CreatedAt)
+		self.assertIs(Status.Manual, child.TriggerStatus)
+
+	@testcase("Matrix of trigger jobs")
+	def Matrix(self) -> None:
+		"""
+		A trigger job with 'parallel:matrix' is an instance of a matrix, named as GitLab names it.
+
+		Parses two instances.
+		"""
+		pipeline = Pipeline.Parse(_pipeline(), None, [
+			_bridge(id=201, name="deploy: [staging]"), _bridge(id=202, name="deploy: [production]")
+		])
+		instances = pipeline.Matrices["deploy"].Instances
+
+		self.assertEqual(["deploy: [staging]", "deploy: [production]"], [str(instance) for instance in instances])
+		self.assertIsInstance(instances[0], MatrixDownstreamPipeline)
+		self.assertEqual({"0": "staging"}, instances[0].Dimensions)
+		self.assertEqual("deploy: [staging]", instances[0].QualifiedName)
+		self.assertIs(Status.Success, instances[0].Status)
+
+	@testcase("Wrong payloads")
+	def WrongPayloads(self) -> None:
+		"""
+		A trigger job or a downstream payload that isn't a JSON object is rejected; a trigger job needs a name.
+
+		Checks each message.
+		"""
+		with self.assertRaises(TypeError) as context:
+			Pipeline.Parse(_pipeline(), None, ["bridge"])
+		self.assertEqual("Trigger job 0 is not of type 'dict'.", str(context.exception))
+
+		with self.assertRaises(GitLabError) as context:
+			Pipeline.Parse(_pipeline(), None, [{"id": 1}])
+		self.assertEqual("Field 'bridges[0].name' is missing.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Pipeline.Parse(_pipeline(), None, [_bridge()], {4800: []})
+		self.assertEqual("Payload of 'bridges[0]' is not of type 'dict'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Pipeline.Parse(_pipeline(), None, [_bridge()], {4800: {"pipeline": []}})
+		self.assertEqual("Downstream pipeline of 'bridges[0]' is not of type 'dict'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			DownstreamPipeline("child", downstreamID="4800")
+		self.assertEqual("Parameter 'downstreamID' is not of type 'int'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			DownstreamPipeline("child", triggerStatus="success")
+		self.assertEqual("Parameter 'triggerStatus' is not of type 'Status'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			DownstreamPipeline("child", triggerURL="https://gitlab.com")
+		self.assertEqual("Parameter 'triggerURL' is not of type 'URL'.", str(context.exception))
+
+	@testcase("Recorded child pipeline")
+	def RecordedChild(self) -> None:
+		"""
+		A recorded pipeline with a child pipeline: the child's 38 jobs are below its trigger job, which reports the child
+		pipeline's times.
+
+		Reads the GitLab Development Kit's pipeline with its trigger job and child pipeline.
+		"""
+		recording = _recording("GitLabDevelopmentKit")
+		pipeline = Pipeline.Parse(**recording)
+		child = pipeline.Workflows["components"]
+		childPipeline = recording["downstream"]["2954935189"]["pipeline"]
+
+		self.assertEqual(2954935189, child.DownstreamID)
+		self.assertFalse(child.IsMultiProject)
+		self.assertEqual(38, len(child.Jobs))
+		self.assertEqual(72, len(list(pipeline.IterateJobs())))
+		self.assertEqual(datetime.fromisoformat(childPipeline["finished_at"]), child.CompletedAt)
+		self.assertEqual("components / component:redis:test", child.GetElement("component:redis:test").QualifiedName)
+
+	@testcase("Recorded multi-project pipelines")
+	def RecordedMultiProject(self) -> None:
+		"""
+		A recorded pipeline triggering pipelines of two other projects, one of which failed.
+
+		Reads the GitLab Runner's pipeline with its trigger jobs.
+		"""
+		pipeline = Pipeline.Parse(**_recording("GitLabRunner"))
+		incept = pipeline.Workflows["trigger runner-incept tests"]
+
+		self.assertEqual(2, len(pipeline.Workflows))
+		self.assertTrue(incept.IsMultiProject)
+		self.assertEqual("gitlab-org/ci-cd/tests/runner-incept", incept.Reference)
+		self.assertIs(Status.Failed, incept.Status)
+		self.assertIs(Status.Success, incept.TriggerStatus)
+		self.assertEqual(
+			"gitlab-org/ci-cd/gitlab-runner-ubi-images", pipeline.Workflows["trigger UBI images build"].Reference
+		)
+
+
+@testsuite("Stage dependencies")
+class Stages(Testcase):
+	"""Dependencies the stages and the 'needs' of a pipeline file imply."""
+
+	def _Pipeline(self) -> Pipeline:
+		"""
+		Build a pipeline with jobs in three stages, a matrix and a trigger job.
+
+		:returns: The pipeline.
+		"""
+		return Pipeline.Parse(_pipeline(), [
+			_job(id=101, name="compile", stage="build"),
+			_job(id=102, name="lint", stage="build"),
+			_job(id=103, name="unit: [3.13]", stage="test"),
+			_job(id=104, name="unit: [3.14]", stage="test"),
+			_job(id=105, name="docs", stage="test"),
+		], [_bridge(id=201, name="release", stage="deploy")])
+
+	@testcase("Stages")
+	def ByStage(self) -> None:
+		"""
+		An element needs every element of the nearest earlier stage holding elements.
+
+		Applies the stages ``build``, ``test``, an empty ``package`` and ``deploy``.
+		"""
+		pipeline = self._Pipeline()
+		pipeline.ApplyNeeds(("build", "test", "package", "deploy"))
+
+		self.assertEqual([], pipeline.GetElement("compile").Needs)
+		self.assertEqual(["compile", "lint"], [need.Name for need in pipeline.Matrices["unit"].Needs])
+		self.assertEqual(["compile", "lint"], [need.Name for need in pipeline.GetElement("docs").Needs])
+		self.assertEqual(["unit", "docs"], [need.Name for need in pipeline.Workflows["release"].Needs])
+		pipeline.Validate()
+
+	@testcase("Needs")
+	def Needs(self) -> None:
+		"""
+		An element with 'needs' needs the named siblings only; 'needs: []' needs nothing.
+
+		Applies the stages with 'needs' for the matrix and the trigger job.
+		"""
+		pipeline = self._Pipeline()
+		pipeline.ApplyNeeds(("build", "test", "deploy"), {"unit": ["compile"], "release": []})
+
+		self.assertEqual(["compile"], [need.Name for need in pipeline.Matrices["unit"].Needs])
+		self.assertEqual([], pipeline.Workflows["release"].Needs)
+		self.assertEqual(["compile", "lint"], [need.Name for need in pipeline.GetElement("docs").Needs])
+
+	@testcase("Unknown stage")
+	def UnknownStage(self) -> None:
+		"""
+		An element of a stage that isn't listed is an error, whose note lists the stages.
+
+		Applies stages without ``deploy``.
+		"""
+		with self.assertRaises(GitLabError) as context:
+			self._Pipeline().ApplyNeeds(("build", "test"))
+
+		self.assertEqual(
+			"Element 'release' of '#12' is in stage 'deploy', which isn't one of the stages.", str(context.exception)
+		)
+		self.assertEqual(["Stages: build, test."], context.exception.__notes__)
+
+	@testcase("Unknown need")
+	def UnknownNeed(self) -> None:
+		"""
+		A need naming no sibling is an error.
+
+		Applies a need of a job that doesn't exist.
+		"""
+		with self.assertRaises(GitLabError) as context:
+			self._Pipeline().ApplyNeeds(("build", "test", "deploy"), {"docs": ["missing"]})
+
+		self.assertEqual("Element 'docs' of '#12' needs 'missing', which no sibling is named.", str(context.exception))
+
+	@testcase("Wrong parameters")
+	def WrongParameters(self) -> None:
+		"""
+		The stages and the needs are checked.
+
+		Checks each message.
+		"""
+		with self.assertRaises(ValueError) as context:
+			self._Pipeline().ApplyNeeds(None)
+		self.assertEqual("Parameter 'stages' is None.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			self._Pipeline().ApplyNeeds("build")
+		self.assertEqual("Parameter 'stages' is not iterable.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			self._Pipeline().ApplyNeeds(("build",), ["unit"])
+		self.assertEqual("Parameter 'needs' is not a mapping ('dict', ...).", str(context.exception))
