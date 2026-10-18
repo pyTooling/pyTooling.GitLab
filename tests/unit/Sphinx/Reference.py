@@ -326,3 +326,244 @@ class Drift(Project):
 
 		self.assertEqual([], self._WarningLines())
 
+
+@testsuite("Dependency lists")
+class DependencyLists(Project):
+	"""The directive 'glci:dependencies'."""
+
+	DEPENDENCIES = dedent("""\
+		include:
+		  - local: /ci/build.yml
+		  - project: group/shared
+		    ref: v1
+		    file: [/templates/a.yml]
+		  - remote: 'https://example.com/ci.yml'
+		  - template: Auto-DevOps.gitlab-ci.yml
+		  - component: $CI_SERVER_FQDN/group/components/lint@1.0
+
+		default:
+		  image: python:3.14
+
+		Child:
+		  trigger:
+		    include: /ci/child.yml
+
+		Downstream:
+		  trigger:
+		    project: group/other
+
+		Test:
+		  image: alpine
+		  services: [postgres:16]
+		  script: [make]
+	""")
+	"""A pipeline file using every kind of dependency."""
+
+	PAGE = ".. glci:pipeline:: Uses\n\nUses\n####\n\n.. glci:dependencies::\n"
+	"""A page listing the dependencies of the pipeline 'Uses'."""
+
+	def setUp(self) -> None:
+		super().setUp()
+		(self._path / "pipelines" / "ci").mkdir()
+		build = self._path / "pipelines" / "ci" / "build.yml"
+		build.write_text("Build:\n  image: gcc\n  script: [make]\n", encoding="utf-8")
+		(self._path / "pipelines" / "ci" / "child.yml").write_text("Job:\n  script: [make]\n", encoding="utf-8")
+
+	@testcase("Derived")
+	def Derived(self) -> None:
+		"""
+		The includes, the triggered pipelines and the images are listed; a local include with its own dependencies.
+
+		Builds the list of a file using every kind of dependency.
+		"""
+		self._Pipeline("Uses", self.DEPENDENCIES)
+		self._Build({"Uses": self.PAGE}, glci_repository_root="../pipelines")
+
+		self.assertEqual([], self._WarningLines())
+		html = self._HTML("Uses")
+		dependencies = html[html.index('class="glci-dependencies'):]
+		dependencies = dependencies[:dependencies.rindex("</ul>")]
+		for text in (
+			"/ci/build.yml", "group/shared", "/templates/a.yml", "https://example.com/ci.yml", "Auto-DevOps.gitlab-ci.yml",
+			"$CI_SERVER_FQDN/group/components/lint&#64;1.0", "python:3.14", "alpine", "postgres:16", "group/other", "gcc"
+		):
+			with self.subTest(text=text):
+				self.assertIn(text, dependencies)
+
+		self.assertIn("<em>Child</em>", dependencies)
+		self.assertIn("/ci/child.yml", dependencies)
+		self.assertLess(dependencies.index("/ci/build.yml"), dependencies.index("gcc"))
+
+	@testcase("Links")
+	def Links(self) -> None:
+		"""
+		A local include links to GitLab at the documented ref; another project, a URL and a component link too.
+
+		Builds the list with project, ref and repository root configured.
+		"""
+		self._Pipeline("Uses", self.DEPENDENCIES)
+		self._Build({"Uses": self.PAGE}, glci_repository_root="../pipelines", glci_ref="v2")
+
+		html = self._HTML("Uses")
+		self.assertIn('href="https://gitlab.com/group/project/-/blob/v2/ci/build.yml"', html)
+		self.assertIn('href="https://gitlab.com/group/shared"', html)
+		self.assertIn('href="https://example.com/ci.yml"', html)
+		self.assertIn('href="https://gitlab.com/group/components"', html)
+
+	@testcase("Merged")
+	def Merged(self) -> None:
+		"""
+		A hand-written item named as a derived one adds its nested list to it; any other is appended.
+
+		Builds the list with hand-written items for an include and an image, and a new one.
+		"""
+		self._Pipeline("Uses", self.DEPENDENCIES)
+		page = self.PAGE + (
+			"\n"
+			"   * /ci/build.yml\n\n"
+			"     * GCC's plugins\n\n"
+			"   * alpine\n\n"
+			"     * curl\n\n"
+			"   * pip\n"
+		)
+		self._Build({"Uses": page}, glci_repository_root="../pipelines")
+
+		self.assertEqual([], self._WarningLines())
+		html = self._HTML("Uses")
+		dependencies = html[html.index('class="glci-dependencies'):]
+		build = dependencies[dependencies.index("/ci/build.yml"):dependencies.index("group/shared")]
+		self.assertIn("GCC’s plugins", build)
+		alpine = dependencies[dependencies.index("alpine"):dependencies.index("postgres:16")]
+		self.assertIn("curl", alpine)
+		self.assertLess(dependencies.index("postgres:16"), dependencies.index("<p>pip</p>"))
+
+	@testcase("No dependencies")
+	def Nothing(self) -> None:
+		"""
+		A file using nothing says *none*.
+
+		Builds the list of a file without includes, triggers and images.
+		"""
+		self._Pipeline("Simple")
+		self._Build({"Simple": SIMPLE_PAGE + "\n.. glci:dependencies::\n"})
+
+		self.assertIn("<em>none</em>", self._HTML("Simple"))
+
+	@testcase("Malformed include")
+	def MalformedInclude(self) -> None:
+		"""
+		A local include that isn't a well-formed configuration is a warning; it is listed without its dependencies.
+
+		Builds the list of a file including a malformed file.
+		"""
+		build = self._path / "pipelines" / "ci" / "build.yml"
+		build.write_text("Build:\n  needs: [Missing]\n  script: [x]\n", encoding="utf-8")
+		self._Pipeline("Uses", self.DEPENDENCIES)
+		self._Build({"Uses": self.PAGE}, glci_repository_root="../pipelines")
+
+		lines = self._WarningLines()
+		self.assertEqual(1, len(lines))
+		self.assertTrue(lines[0].startswith("src/Uses.rst:6: WARNING: glci:dependencies: "))
+		self.assertIn("/ci/build.yml", self._HTML("Uses"))
+
+
+@testsuite("YAML excerpts")
+class YAMLExcerpts(Project):
+	"""The directive 'glci:yaml'."""
+
+	def _Excerpt(self, options: str = "", **config: object) -> str:
+		"""
+		Build the page 'Package' with a YAML excerpt and return the excerpt's HTML.
+
+		:param options: Optional, the directive's options, one per line. Default: ``""``.
+		:param config:  Configuration values overriding the defaults.
+		:returns:       The HTML of the excerpt's container.
+		"""
+		self._Pipeline("Package", PIPELINE)
+		self._Build({"Package": PAGE + PARAMETERS + "\n.. glci:yaml::\n" + options}, **config)
+
+		html = self._HTML("Package")
+		return html[html.index('class="literal-block-wrapper'):]
+
+	@testcase("Inputs")
+	def Inputs(self) -> None:
+		"""
+		Section 'inputs' shows the header's inputs, numbered as in the file.
+
+		Builds the excerpt of the inputs.
+		"""
+		excerpt = self._Excerpt("   :section: inputs\n")
+
+		self.assertEqual([], self._WarningLines())
+		self.assertIn("Package.yml, lines 3-21", excerpt)
+		self.assertIn("package_name", excerpt)
+		self.assertNotIn("DEPLOY_ENV", excerpt[:excerpt.index("</pre>")])
+
+	@testcase("Top-level key")
+	def TopLevelKey(self) -> None:
+		"""
+		A top-level key is found behind the header document.
+
+		Builds the excerpts of the variables and the stages.
+		"""
+		excerpt = self._Excerpt("   :section: variables\n")
+		self.assertIn("Package.yml, lines 23-28", excerpt)
+
+		excerpt = self._Excerpt("   :section: stages\n")
+		self.assertIn("Package.yml, line", excerpt)
+		self.assertIn("build", excerpt)
+
+	@testcase("Job")
+	def Job(self) -> None:
+		"""
+		Option ':job:' shows a job, shifted left.
+
+		Builds the excerpt of the job 'Build'.
+		"""
+		excerpt = self._Excerpt("   :job: Build\n")
+
+		self.assertIn("Package.yml, lines 32-35", excerpt)
+		self.assertIn("Building", excerpt)
+
+	@testcase("Whole file with link")
+	def File(self) -> None:
+		"""
+		Without options, the whole file is shown; the caption links to GitLab when project, ref and root are configured.
+
+		Builds the excerpt of the whole file with 'glci_ref' and 'glci_repository_root'.
+		"""
+		excerpt = self._Excerpt(glci_ref="v1", glci_repository_root="..")
+
+		self.assertIn('href="https://gitlab.com/group/project/-/blob/v1/pipelines/Package.yml"', excerpt)
+
+	@testcase("Unknown job and missing section")
+	def Missing(self) -> None:
+		"""
+		A job or a section the file doesn't have is a warning.
+
+		Builds excerpts of an unknown job and of the section 'include'.
+		"""
+		self._Pipeline("Package", PIPELINE)
+		excerpts = "\n.. glci:yaml::\n   :job: Unknown\n\n.. glci:yaml::\n   :section: include\n"
+		self._Build({"Package": PAGE + PARAMETERS + excerpts})
+
+		lines = self._WarningLines()
+		self.assertIn("glci:yaml: Pipeline 'Package' has no job 'Unknown'. [glci.drift]", lines[0])
+		self.assertIn("glci:yaml: Pipeline 'Package' has no include. [glci.drift]", lines[1])
+
+	@testcase("Wrong options")
+	def WrongOptions(self) -> None:
+		"""
+		Options ':section:' and ':job:' together, and an unknown section, are errors.
+
+		Builds both.
+		"""
+		self._Pipeline("Package", PIPELINE)
+		excerpts = "\n.. glci:yaml::\n   :job: Build\n   :section: inputs\n\n.. glci:yaml::\n   :section: jobs\n"
+		page = PAGE + PARAMETERS + excerpts
+		self._Build({"Package": page})
+
+		lines = self._WarningLines()
+		self.assertTrue(any("Options ':section:' and ':job:' exclude each other." in line for line in lines))
+		message = "'jobs' is not one of inputs, variables, stages, include, workflow, default."
+		self.assertTrue(any(message in line for line in lines))
