@@ -66,6 +66,7 @@ ignore-setters = true
 branch = true
 include = ["pyTooling/GitLab/*"]
 relative_files = true
+patch = ["subprocess"]
 omit = [
 	"*site-packages*",
 	"setup.py",
