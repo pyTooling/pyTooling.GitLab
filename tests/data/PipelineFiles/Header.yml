@@ -1,0 +1,8 @@
+# A configuration with a header document.
+spec:
+  inputs:
+    stage:
+      default: test
+---
+variables:
+  STAGE: $[[ inputs.stage ]]
