@@ -1,0 +1,4 @@
+# A child pipeline starting itself.
+again:
+  trigger:
+    include: /ci/self.yml

@@ -1,0 +1,11 @@
+# Hidden jobs, which other files extend or refer to; including a file in turn.
+include: /ci/more.yml
+
+.base:
+  stage: test
+  variables:
+    FROM: templates
+
+.setup:
+  script:
+    - echo setup
