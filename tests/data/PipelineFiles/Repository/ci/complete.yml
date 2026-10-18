@@ -1,0 +1,6 @@
+# A configuration including local files only, extending a job none of them has.
+include: /ci/templates.yml
+
+job:
+  extends: .missing
+  script: echo job

@@ -1,0 +1,49 @@
+# A configuration with parallel jobs, a matrix, a need of matrix instances, and trigger jobs.
+stages: [build, test, deploy]
+
+build:
+  stage: build
+  script: make
+  parallel:
+    matrix:
+      - PROVIDER: aws
+        STACK: [monitoring, app1]
+      - PROVIDER: [gcp, vultr]
+        STACK: [data]
+
+test:
+  script: pytest
+  parallel: 3
+  needs:
+    - job: build
+      parallel:
+        matrix:
+          - PROVIDER: aws
+            STACK: app1
+
+child:
+  stage: deploy
+  trigger:
+    include:
+      - local: /ci/child.yml
+        inputs:
+          environment: staging
+      - artifact: generated.yml
+        job: build
+    strategy: mirror
+
+downstream:
+  stage: deploy
+  trigger:
+    project: group/other
+    branch: main
+    strategy: depend
+
+short:
+  stage: deploy
+  trigger: group/short
+
+single:
+  stage: deploy
+  trigger:
+    include: /ci/single.yml

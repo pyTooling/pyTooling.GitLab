@@ -1,0 +1,40 @@
+# Python cache and object files
+__pycache__/
+*.py[cod]
+
+# Coverage.py
+.coverage
+.cov
+coverage.xml
+/report/coverage
+
+# mypy
+/report/typing
+
+# pytest
+/report/unit
+/tests/output
+
+# bandit
+/report/bandit
+
+# setuptools
+/build/**/*.*
+/dist/**/*.*
+/*.egg-info
+
+# Dependencies
+!requirements.txt
+
+# Sphinx
+doc/_build/
+doc/pyTooling.GitLab/**/*.*
+
+# BuildTheDocs
+doc/_theme/**/*.*
+
+# PyCharm project files
+/.idea/workspace.xml
+
+# Git files
+!.git*

@@ -1,0 +1,18 @@
+# A configuration extending, and referring to, jobs of the local files it includes, and of a template.
+include:
+  - local: /ci/templates.yml
+  - template: Auto-DevOps.gitlab-ci.yml
+
+job:
+  extends: .base
+  script:
+    - !reference [.setup, script]
+    - echo job
+
+deep:
+  extends: .deep
+  script: echo deep
+
+other:
+  extends: .remote
+  script: echo other

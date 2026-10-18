@@ -1,0 +1,38 @@
+# A repository's configuration, whose trigger job starts a child pipeline of the repository.
+stages: [build, test, deploy]
+
+.template:
+  script: hidden
+
+build:
+  stage: build
+  script: make
+
+lint:
+  stage: build
+  script: lint
+
+test:
+  stage: test
+  script: pytest
+  parallel:
+    matrix:
+      - PYTHON: ["3.13", "3.14"]
+
+docs:
+  stage: test
+  needs: [build]
+  script: docs
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+deploy:
+  stage: deploy
+  trigger:
+    include: /ci/child.yml
+    strategy: mirror
+
+downstream:
+  stage: deploy
+  needs: []
+  trigger: group/other
