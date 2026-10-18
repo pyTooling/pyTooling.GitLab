@@ -372,8 +372,13 @@ from by :attr:`~pyTooling.GitLab.PipelineFile.DefinitionMixin.Definition`:
 
 The pipeline is named by ``workflow:name``, or else by the file's name. A job without ``needs`` needs every element
 of the nearest earlier stage holding elements; ``needs`` replaces that, and ``needs: []`` needs nothing. A need of
-some instances of a matrix needs the whole matrix. A job's only rule is its
-:attr:`~pyTooling.GitLab.PipelineFile.Job.Condition`. The result converts into a graph:
+some instances of a matrix needs the whole matrix.
+
+Each rule of a job becomes a :class:`~pyTooling.CI.Rule` of the element, in the order GitLab evaluates them: its
+condition is the rule's ``if``, its :attr:`~pyTooling.CI.Rule.When` the rule's ``when``, else the job's, else
+``on_success``. ``changes``, ``compare_to``, ``exists``, ``allow_failure`` and ``variables`` are the rule's
+key-value-pairs. A job with ``when``, but without rules, gets one rule without condition; ``workflow:rules`` are the
+pipeline's rules, deciding ``always`` unless they say ``never``. The result converts into a graph:
 
 .. code-block:: python
 

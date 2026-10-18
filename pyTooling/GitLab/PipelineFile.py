@@ -67,11 +67,11 @@ from __future__               import annotations
 from itertools                import product
 from pathlib                  import Path
 from typing                   import Any, ClassVar, Generic, Hashable, Iterable, Iterator, Mapping, Optional as Nullable
-from typing                   import Self, TypeVar, Union
+from typing                   import Self, Sequence, TypeVar, Union
 
 from pyTooling.CI             import DependencyMixin, Job as CIJob, JobGroup, Matrix as CIMatrix
 from pyTooling.CI             import MatrixJob as CIMatrixJob, MatrixWorkflow as CIMatrixWorkflow
-from pyTooling.CI             import Pipeline as CIPipeline, RuleOutcome, Workflow as CIWorkflow
+from pyTooling.CI             import Pipeline as CIPipeline, Rule as CIRule, RuleOutcome, Workflow as CIWorkflow
 
 from pyTooling.Common         import getFullyQualifiedName, StringEnum
 from pyTooling.Decorators     import export, readonly
@@ -1664,18 +1664,6 @@ class Job(Base[PipelineFile]):
 		:returns: The rules, in the order GitLab evaluates them.
 		"""
 		return self._rules
-
-	@readonly
-	def Condition(self) -> Nullable[str]:
-		"""
-		Read-only property to return the condition under which the job runs, as :mod:`pyTooling.CI` names it.
-
-		GitLab's rules are evaluated in order, the first matching one deciding, so only a single rule's ``if`` is a
-		condition of its own.
-
-		:returns: The ``if`` of the job's only rule, or ``None`` for a job with no or several rules.
-		"""
-		return self._rules[0]._condition if len(self._rules) == 1 else None
 
 	@readonly
 	def Inputs(self) -> dict[str, Input]:
@@ -4153,6 +4141,53 @@ class DefinitionMixin(Generic[DefinitionType], metaclass=ExtendedType, mixin=Tru
 			ex.add_note(f"Got type '{getFullyQualifiedName(definition)}'.")
 			raise ex
 
+	@staticmethod
+	def _Rules(rules: Sequence[Rule], when: Nullable[RuleOutcome], default: RuleOutcome) -> list[CIRule]:
+		"""
+		Return the :mod:`pyTooling.CI` rules of an element built from a configuration file.
+
+		Each of the file's rules becomes a rule deciding the rule's ``when``, else the element's, else ``default``. Its
+		``changes``, ``compare_to``, ``exists``, ``allow_failure`` and ``variables`` are the rule's key-value-pairs, as
+		far as it has them. An element with ``when``, but without rules, gets one rule without condition. The rules are
+		built anew for every element, as the instances of a matrix share one definition.
+
+		:param rules:   The rules of the file's element, in the order GitLab evaluates them.
+		:param when:    The ``when`` of the file's element, or ``None``.
+		:param default: What a rule decides, if neither the rule nor the element say.
+		:returns:       The rules, empty for an element with neither rules nor ``when``.
+		"""
+		if len(rules) == 0:
+			return [] if when is None else [CIRule(None, when)]
+
+		ciRules = []
+		for rule in rules:
+			keyValuePairs: dict[Hashable, Any] = {}
+			if len(rule._changes) > 0:
+				keyValuePairs["changes"] = rule._changes
+
+			if rule._compareTo is not None:
+				keyValuePairs["compare_to"] = rule._compareTo
+
+			if len(rule._exists) > 0:
+				keyValuePairs["exists"] = rule._exists
+
+			if rule._allowFailure is not None:
+				keyValuePairs["allow_failure"] = rule._allowFailure
+
+			if len(rule._variables) > 0:
+				keyValuePairs["variables"] = dict(rule._variables)
+
+			if rule._when is not None:
+				outcome = rule._when
+			elif when is not None:
+				outcome = when
+			else:
+				outcome = default
+
+			ciRules.append(CIRule(rule._condition, outcome, keyValuePairs=keyValuePairs))
+
+		return ciRules
+
 	def __init__(self, definition: DefinitionType) -> None:
 		"""
 		Initializes the link of an element to its definition, which :meth:`_CheckDefinition` checked.
@@ -4218,8 +4253,9 @@ class DefinedPipeline(CIPipeline, DefinitionMixin[PipelineFile]):
 		self._CheckDefinition(definition)
 
 		workflow = definition._workflow
-		name = definition._path.name if workflow is None or workflow._name is None else workflow._name
-		super().__init__(name, keyValuePairs=keyValuePairs)
+		name =     definition._path.name if workflow is None or workflow._name is None else workflow._name
+		rules =    [] if workflow is None else self._Rules(workflow._rules, None, RuleOutcome.Always)
+		super().__init__(name, rules=rules, keyValuePairs=keyValuePairs)
 		DefinitionMixin.__init__(self, definition)
 
 
@@ -4241,7 +4277,7 @@ class DefinedWorkflow(CIWorkflow, ChildPipelineMixin, DefinitionMixin[Job]):
 		Initializes a workflow built from a trigger job, named by the job's key.
 
 		The other project, or the child pipeline's files, are the workflow's :attr:`~pyTooling.CI.Workflow.Reference`,
-		the job's :attr:`~Job.Condition` the workflow's :attr:`~pyTooling.CI.ConditionMixin.Condition`.
+		the job's rules the workflow's :attr:`~pyTooling.CI.RulesMixin.Rules`.
 
 		:param definition:    The trigger job.
 		:param childFiles:    Optional, the files the child pipeline's elements are built from. Default: ``None``.
@@ -4257,8 +4293,9 @@ class DefinedWorkflow(CIWorkflow, ChildPipelineMixin, DefinitionMixin[Job]):
 			raise ex
 
 		super().__init__(
-			definition._name, reference=DefinedWorkflow._Reference(definition), condition=definition.Condition,
-			keyValuePairs=keyValuePairs, parent=parent
+			definition._name, reference=DefinedWorkflow._Reference(definition),
+			rules=self._Rules(definition._rules, definition._when, RuleOutcome.DEFAULT), keyValuePairs=keyValuePairs,
+			parent=parent
 		)
 		ChildPipelineMixin.__init__(self, childFiles)
 		DefinitionMixin.__init__(self, definition)
@@ -4306,7 +4343,10 @@ class DefinedMatrix(CIMatrix, DefinitionMixin[Job]):
 			ex.add_note(f"Got job '{definition._name}'.")
 			raise ex
 
-		super().__init__(definition._name, condition=definition.Condition, keyValuePairs=keyValuePairs, parent=parent)
+		super().__init__(
+			definition._name, rules=self._Rules(definition._rules, definition._when, RuleOutcome.DEFAULT),
+			keyValuePairs=keyValuePairs, parent=parent
+		)
 		DefinitionMixin.__init__(self, definition)
 
 
@@ -4347,8 +4387,9 @@ class DefinedMatrixWorkflow(CIMatrixWorkflow, ChildPipelineMixin, DefinitionMixi
 			raise ValueError("Parameter 'dimensions' is None.")
 
 		super().__init__(
-			definition._name, dimensions, reference=DefinedWorkflow._Reference(definition), condition=definition.Condition,
-			keyValuePairs=keyValuePairs, parent=parent
+			definition._name, dimensions, reference=DefinedWorkflow._Reference(definition),
+			rules=self._Rules(definition._rules, definition._when, RuleOutcome.DEFAULT), keyValuePairs=keyValuePairs,
+			parent=parent
 		)
 		ChildPipelineMixin.__init__(self, childFiles)
 		DefinitionMixin.__init__(self, definition)
@@ -4384,7 +4425,10 @@ class DefinedJob(CIJob, DefinitionMixin[Job]):
 		"""
 		self._CheckDefinition(definition)
 
-		super().__init__(definition._name, condition=definition.Condition, keyValuePairs=keyValuePairs, parent=parent)
+		super().__init__(
+			definition._name, rules=self._Rules(definition._rules, definition._when, RuleOutcome.DEFAULT),
+			keyValuePairs=keyValuePairs, parent=parent
+		)
 		DefinitionMixin.__init__(self, definition)
 
 
@@ -4418,7 +4462,8 @@ class DefinedMatrixJob(CIMatrixJob, DefinitionMixin[Job]):
 			raise ValueError("Parameter 'dimensions' is None.")
 
 		super().__init__(
-			definition._name, dimensions, condition=definition.Condition, keyValuePairs=keyValuePairs, parent=parent
+			definition._name, dimensions, rules=self._Rules(definition._rules, definition._when, RuleOutcome.DEFAULT),
+			keyValuePairs=keyValuePairs, parent=parent
 		)
 		DefinitionMixin.__init__(self, definition)
 

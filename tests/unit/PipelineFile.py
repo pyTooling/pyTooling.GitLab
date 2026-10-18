@@ -2268,17 +2268,88 @@ class ToPipeline(Fixture):
 
 		self.assertEqual(".gitlab-ci.yml", PipelineFile.FromFile(REPOSITORY / ".gitlab-ci.yml").ToPipeline().Name)
 
-	@testcase("Condition")
-	def Condition(self) -> None:
+	@testcase("Rules")
+	def Rules(self) -> None:
 		"""
-		A job's only rule is its condition; a job with no rules has none.
+		A job's rules are the element's rules; a job with neither rules nor 'when' has none.
 
 		Checks jobs 'docs' and 'build'.
 		"""
 		pipeline = PipelineFile.FromFile(REPOSITORY / ".gitlab-ci.yml").ToPipeline()
 
-		self.assertEqual('$CI_COMMIT_BRANCH == "main"', pipeline.GetElement("docs").Condition)
-		self.assertIsNone(pipeline.GetElement("build").Condition)
+		docs = pipeline.GetElement("docs")
+		self.assertEqual(1, docs.RuleCount)
+		self.assertEqual('$CI_COMMIT_BRANCH == "main"', docs.Rules[0].Condition)
+		self.assertIs(RuleOutcome.OnSuccess, docs.Rules[0].When)
+		self.assertIs(docs, docs.Rules[0].Parent)
+
+		self.assertEqual(0, pipeline.GetElement("build").RuleCount)
+
+	@testcase("Rules: when and key-value-pairs")
+	def RulesWhen(self) -> None:
+		"""
+		A rule decides its own 'when', else the job's, else on_success; a job's 'when' without rules is a rule.
+
+		Checks the rules of the workflow, of a job with 'when' only, of a job with rules and of a matrix' instances.
+		"""
+		pipelineFile = PipelineFile.FromFile(self._Write(dedent("""\
+			workflow:
+			  rules:
+			    - if: $CI_COMMIT_TAG
+			      when: never
+			    - if: $CI_PIPELINE_SOURCE == "push"
+			build:
+			  script: make
+			  when: manual
+			test:
+			  script: pytest
+			  when: manual
+			  rules:
+			    - if: $A
+			      changes:
+			        paths: [src/**]
+			        compare_to: main
+			      allow_failure: true
+			      variables:
+			        X: "1"
+			    - exists: [setup.py]
+			      when: never
+			    - when: on_success
+			matrix:
+			  script: pytest
+			  parallel: 2
+			  rules:
+			    - if: $B
+			""")))
+		pipeline = pipelineFile.ToPipeline()
+
+		self.assertEqual(2, pipeline.RuleCount)
+		self.assertEqual("$CI_COMMIT_TAG", pipeline.Rules[0].Condition)
+		self.assertIs(RuleOutcome.Never, pipeline.Rules[0].When)
+		self.assertIs(RuleOutcome.Always, pipeline.Rules[1].When)
+
+		build = pipeline.GetElement("build")
+		self.assertEqual(1, build.RuleCount)
+		self.assertIsNone(build.Rules[0].Condition)
+		self.assertIs(RuleOutcome.Manual, build.Rules[0].When)
+
+		first, second, third = pipeline.GetElement("test").Rules
+		self.assertEqual("$A", first.Condition)
+		self.assertIs(RuleOutcome.Manual, first.When)
+		self.assertEqual(("src/**", ), first["changes"])
+		self.assertEqual("main", first["compare_to"])
+		self.assertIs(True, first["allow_failure"])
+		self.assertEqual({"X": "1"}, first["variables"])
+		self.assertIsNone(second.Condition)
+		self.assertIs(RuleOutcome.Never, second.When)
+		self.assertEqual(("setup.py", ), second["exists"])
+		self.assertNotIn("changes", second)
+		self.assertIs(RuleOutcome.OnSuccess, third.When)
+
+		matrix = pipeline.Matrices["matrix"]
+		self.assertEqual("$B", matrix.Rules[0].Condition)
+		self.assertIsNot(matrix.Instances[0].Rules[0], matrix.Instances[1].Rules[0])
+		self.assertIs(matrix.Instances[1], matrix.Instances[1].Rules[0].Parent)
 
 	@testcase("Needs")
 	def Needs(self) -> None:
