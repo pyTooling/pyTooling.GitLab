@@ -31,7 +31,7 @@
 Unit tests for :mod:`pyTooling.GitLab.PipelineFile`.
 
 The configuration file, its stages, variables, jobs, needs, rules, workflow, includes and default, how jobs extend each
-other, parallel jobs and triggers.
+other, parallel jobs, triggers and inputs.
 """
 from pathlib                       import Path
 from tempfile                      import TemporaryDirectory
@@ -39,7 +39,7 @@ from textwrap                      import dedent
 
 from pyTooling.GitLab.PipelineFile import DEFAULT_STAGES, Job, Need, NeedKind, PipelineFile, PipelineFileError
 from pyTooling.GitLab.PipelineFile import Default, Include, IncludeKind, Parallel, Rule, Trigger, TriggerStrategy
-from pyTooling.GitLab.PipelineFile import Variable, When, Workflow
+from pyTooling.GitLab.PipelineFile import Input, InputType, Variable, When, Workflow
 from pyTooling.Testing             import Testcase, testsuite, testcase
 
 
@@ -1951,3 +1951,263 @@ class ParallelErrors(Fixture):
 		self.assertEqual("Key 'strategy' of the trigger of job 't' is not a known value.", str(context.exception))
 		self.assertEqual(4, context.exception.Line)
 		self.assertIn("Allowed values: depend, mirror.", context.exception.__notes__)
+
+
+@testsuite("Inputs")
+class Inputs(Fixture):
+	"""Reading the header's 'spec:inputs' and the inputs of jobs, and constructing inputs."""
+
+	@testcase("Inputs of the header")
+	def Header(self) -> None:
+		"""
+		The header's inputs have a type, a default of that type, and are required without one.
+
+		Checks the inputs of the fixture.
+		"""
+		pipelineFile = PipelineFile.FromFile(DATA / "Inputs.yml")
+		inputs = pipelineFile.Inputs
+
+		self.assertEqual("Lints a Python package.", pipelineFile.Description)
+		self.assertEqual(["stage", "python", "strict", "retries", "paths", "version", "environment"], list(inputs))
+		self.assertEqual(4, inputs["stage"].Line)
+		self.assertIs(pipelineFile, inputs["stage"].Parent)
+		self.assertEqual("stage", str(inputs["stage"]))
+
+		self.assertIs(InputType.String, inputs["stage"].Type)
+		self.assertEqual("test", inputs["stage"].Default)
+		self.assertEqual("Stage of the job.", inputs["stage"].Description)
+		self.assertIs(False, inputs["stage"].Required)
+
+		self.assertEqual(("3.13", "3.14"), inputs["python"].Options)
+		self.assertIs(InputType.Boolean, inputs["strict"].Type)
+		self.assertIs(False, inputs["strict"].Default)
+		self.assertIs(InputType.Number, inputs["retries"].Type)
+		self.assertEqual(2, inputs["retries"].Default)
+		self.assertIs(InputType.Array, inputs["paths"].Type)
+		self.assertEqual(["src", "tests"], inputs["paths"].Default)
+
+		self.assertEqual(r"^v\d+$", inputs["version"].Regex)
+		self.assertIs(True, inputs["version"].Required)
+		self.assertIs(True, inputs["environment"].Required)
+		self.assertIsNone(inputs["environment"].Default)
+
+	@testcase("Inputs of a job")
+	def JobInputs(self) -> None:
+		"""
+		A job's inputs have a default, options and a description.
+
+		Checks the input of job 'lint'.
+		"""
+		lint = PipelineFile.FromFile(DATA / "Inputs.yml").Jobs["lint"]
+		level = lint.Inputs["level"]
+
+		self.assertIs(lint, level.Parent)
+		self.assertEqual("warning", level.Default)
+		self.assertEqual(("warning", "error"), level.Options)
+		self.assertEqual("Level reported.", level.Description)
+		self.assertEqual("$[[ inputs.stage ]]", lint.Stage)
+
+	@testcase("Rules of an input")
+	def Rules(self) -> None:
+		"""
+		An input's rules are kept as written.
+
+		Reads an input with two rules.
+		"""
+		path = self._Write(dedent("""\
+			spec:
+			  inputs:
+			    size:
+			      rules:
+			        - if: $[[ inputs.env ]] == 'dev'
+			          options: [small]
+			          default: small
+			        - options: [large]
+			          default: large
+			---
+			job:
+			  script: x
+			"""))
+		size = PipelineFile.FromFile(path).Inputs["size"]
+
+		self.assertEqual(
+			({"if": "$[[ inputs.env ]] == 'dev'", "options": ["small"], "default": "small"},
+			{"options": ["large"], "default": "large"}),
+			size.Rules
+		)
+
+	@testcase("Without header")
+	def WithoutHeader(self) -> None:
+		"""
+		A file without header has no inputs and no description; a job without 'inputs' none.
+
+		Checks fixture 'Jobs.yml'.
+		"""
+		pipelineFile = PipelineFile.FromFile(DATA / "Jobs.yml")
+
+		self.assertEqual({}, pipelineFile.Inputs)
+		self.assertIsNone(pipelineFile.Description)
+		self.assertEqual({}, pipelineFile.Jobs["build"].Inputs)
+
+	@testcase("Constructed")
+	def Constructed(self) -> None:
+		"""
+		An input constructed with a file or job as parent is attached to it, and so is one passed to them.
+
+		Constructs inputs both ways.
+		"""
+		pipelineFile = PipelineFile(Path(".gitlab-ci.yml"), description="A component.")
+		stage = Input("stage", 3, parent=pipelineFile)
+		self.assertIs(stage, pipelineFile.Inputs["stage"])
+		self.assertEqual("A component.", pipelineFile.Description)
+
+		passed = Input("level", 7, InputType.String, False, "warning")
+		job = Job("lint", 6, inputs=[passed])
+		other = PipelineFile(Path("other.yml"), inputs=[Input("a", 2)], jobs=[job])
+		self.assertIs(job, passed.Parent)
+		self.assertIs(other, passed.PipelineFile)
+		self.assertEqual(["a"], list(other.Inputs))
+
+
+@testsuite("Parameter checks of inputs")
+class InputParameters(Testcase):
+	"""The input's constructor rejects parameters of the wrong type or value."""
+
+	@testcase("Input")
+	def InputChecks(self) -> None:
+		"""
+		An input's name is a non-empty string, its type an InputType, 'required' a boolean, its texts strings.
+
+		Checks each exception, and those of the file and the job.
+		"""
+		with self.assertRaises(ValueError) as context:
+			Input(None, 1)
+		self.assertEqual("Parameter 'name' is None.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Input(1, 1)
+		self.assertEqual("Parameter 'name' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(ValueError) as context:
+			Input("", 1)
+		self.assertEqual("Parameter 'name' is empty.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Input("a", 1, "string")
+		self.assertEqual("Parameter 'inputType' is not of type 'InputType'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Input("a", 1, required="yes")
+		self.assertEqual("Parameter 'required' is not of type 'bool'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Input("a", 1, regex=1)
+		self.assertEqual("Parameter 'regex' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			PipelineFile(Path(".gitlab-ci.yml"), inputs=["a"])
+		self.assertEqual("An element of parameter 'inputs' is not of type 'Input'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			PipelineFile(Path(".gitlab-ci.yml"), description=1)
+		self.assertEqual("Parameter 'description' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Job("a", 1, inputs=["a"])
+		self.assertEqual("An element of parameter 'inputs' is not of type 'Input'.", str(context.exception))
+
+
+@testsuite("Malformed inputs")
+class InputErrors(Fixture):
+	"""A malformed 'spec' or input raises PipelineFileError, naming file and line."""
+
+	@testcase("Malformed spec")
+	def MalformedSpec(self) -> None:
+		"""
+		'spec' and 'spec:inputs' are mappings, an input empty or a mapping of known keys.
+
+		Checks message, line and note of each error.
+		"""
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("spec: [a]\n---\njob:\n  script: x\n"))
+		self.assertEqual("Key 'spec' of the header is not a mapping.", str(context.exception))
+		self.assertEqual(1, context.exception.Line)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("spec:\n  inputs: [a]\n---\njob:\n  script: x\n"))
+		self.assertEqual("Key 'spec:inputs' is not a mapping.", str(context.exception))
+		self.assertEqual(2, context.exception.Line)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("spec:\n  inputs:\n    a: [b]\n---\njob:\n  script: x\n"))
+		self.assertEqual("Input 'a' is not a mapping.", str(context.exception))
+		self.assertEqual(3, context.exception.Line)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("spec:\n  inputs:\n    a:\n      value: b\n---\njob:\n  script: x\n"))
+		self.assertEqual("Input 'a' has unknown key 'value'.", str(context.exception))
+		self.assertEqual(4, context.exception.Line)
+		self.assertIn("Allowed keys: default, type, description, options, regex, rules.", context.exception.__notes__)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("spec:\n  inputs:\n    a:\n      type: text\n---\njob:\n  script: x\n"))
+		self.assertEqual("Key 'type' of input 'a' is not an input type.", str(context.exception))
+		self.assertIn("Allowed values: string, number, boolean, array.", context.exception.__notes__)
+
+	def _Input(self, declaration: str) -> Path:
+		"""
+		Write a configuration file, whose header declares input 'a'.
+
+		:param declaration: The keys of input 'a', each line indented by six spaces.
+		:returns:           Path to the file.
+		"""
+		return self._Write(f"spec:\n  inputs:\n    a:\n{declaration}---\njob:\n  script: x\n")
+
+	@testcase("Defaults, options and regex")
+	def Defaults(self) -> None:
+		"""
+		A default matches the type and the options; a regex needs type 'string'; options and rules are lists.
+
+		Checks message and note of each error.
+		"""
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Input("      type: number\n      default: two\n"))
+		self.assertEqual("Default of input 'a' is not of type 'number'.", str(context.exception))
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Input("      type: boolean\n      default: 1\n"))
+		self.assertEqual("Default of input 'a' is not of type 'boolean'.", str(context.exception))
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Input("      type: number\n      default: true\n"))
+		self.assertEqual("Default of input 'a' is not of type 'number'.", str(context.exception))
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Input("      options: [x, y]\n      default: z\n"))
+		self.assertEqual("Default of input 'a' is not one of its options.", str(context.exception))
+		self.assertIn("Options: x, y.", context.exception.__notes__)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Input("      type: number\n      regex: \\\\d\n"))
+		self.assertEqual("Key 'regex' of input 'a' needs type 'string'.", str(context.exception))
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Input("      options: x\n"))
+		self.assertEqual("Key 'options' of input 'a' is not a list.", str(context.exception))
+
+	@testcase("Malformed inputs of a job")
+	def MalformedJobInputs(self) -> None:
+		"""
+		A job's 'inputs' is a mapping, and each input has a default.
+
+		Checks message and line of both errors.
+		"""
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("j:\n  inputs: [a]\n"))
+		self.assertEqual("Key 'inputs' of job 'j' is not a mapping.", str(context.exception))
+		self.assertEqual(2, context.exception.Line)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("j:\n  inputs:\n    level:\n      options: [a]\n"))
+		self.assertEqual("Input 'level' of job 'j' has no default.", str(context.exception))
+		self.assertEqual(3, context.exception.Line)

@@ -1,0 +1,32 @@
+spec:
+  description: "Lints a Python package."
+  inputs:
+    stage:
+      default: test
+      description: "Stage of the job."
+    python:
+      type: string
+      options: ["3.13", "3.14"]
+      default: "3.14"
+    strict:
+      type: boolean
+      default: false
+    retries:
+      type: number
+      default: 2
+    paths:
+      type: array
+      default: [src, tests]
+    version:
+      regex: ^v\d+$
+    environment:
+---
+# A component's template: a header with inputs, and a job with inputs.
+lint:
+  stage: $[[ inputs.stage ]]
+  script: ruff check
+  inputs:
+    level:
+      default: warning
+      options: [warning, error]
+      description: "Level reported."

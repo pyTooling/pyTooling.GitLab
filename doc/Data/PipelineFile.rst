@@ -29,6 +29,7 @@ The Tree
 .. tree::
 
    - :class:`~pyTooling.GitLab.PipelineFile.PipelineFile` | a configuration file
+     - :class:`~pyTooling.GitLab.PipelineFile.Input`      | an input of the header's ``spec:inputs``
      - :class:`~pyTooling.GitLab.PipelineFile.Workflow`   | the ``workflow`` key
        - :class:`~pyTooling.GitLab.PipelineFile.Rule`     | a rule deciding whether a pipeline is created
      - :class:`~pyTooling.GitLab.PipelineFile.Include`    | an entry of ``include``
@@ -40,6 +41,7 @@ The Tree
          - :class:`~pyTooling.GitLab.PipelineFile.Parallel` | the matrix instances needed
        - :class:`~pyTooling.GitLab.PipelineFile.Rule`     | a rule deciding whether the job is added to a pipeline
        - :class:`~pyTooling.GitLab.PipelineFile.Variable` | a variable of the job
+       - :class:`~pyTooling.GitLab.PipelineFile.Input`    | an input of the job
        - :class:`~pyTooling.GitLab.PipelineFile.Parallel` | the job's ``parallel``: how often it runs, or its matrix
        - :class:`~pyTooling.GitLab.PipelineFile.Trigger`  | the child pipeline or other project's pipeline it starts
          - :class:`~pyTooling.GitLab.PipelineFile.Include` | a file of the child pipeline
@@ -48,7 +50,7 @@ Every element knows its :attr:`~pyTooling.GitLab.PipelineFile.Base.Parent`, and 
 file it belongs to in :attr:`~pyTooling.GitLab.PipelineFile.Base.PipelineFile`.
 
 A file may begin with a **header document**, separated from the configuration by ``---``, which holds the ``spec``
-key. :meth:`~pyTooling.GitLab.PipelineFile.PipelineFile.FromFile` accepts it and reads the configuration below it.
+key - see :ref:`DATA/PipelineFile/Inputs`.
 
 
 .. _DATA/PipelineFile/Stages:
@@ -287,6 +289,47 @@ A file may extend, or refer to, jobs of the files it includes, which aren't read
 error: the job is built from what the file has, and :attr:`~pyTooling.GitLab.PipelineFile.Job.Unresolved` names what
 it lacks, as ``extends .template`` or ``!reference [.setup, script]``. A file including no files must have everything
 it refers to.
+
+
+.. _DATA/PipelineFile/Inputs:
+
+Inputs
+******
+
+A CI/CD component's template, or a file included with inputs, declares its parameters in the header document's
+``spec:inputs``. :attr:`PipelineFile.Inputs <pyTooling.GitLab.PipelineFile.PipelineFile.Inputs>` holds them as
+:class:`~pyTooling.GitLab.PipelineFile.Input`\ s, and
+:attr:`PipelineFile.Description <pyTooling.GitLab.PipelineFile.PipelineFile.Description>` holds ``spec:description``:
+
+.. code-block:: yaml
+
+   spec:
+     description: "Lints a Python package."
+     inputs:
+       stage:
+         default: test
+         description: "Stage of the job."
+       python:
+         options: ["3.13", "3.14"]
+         default: "3.14"
+       version:
+         regex: ^v\d+$
+   ---
+   lint:
+     stage: $[[ inputs.stage ]]
+
+An input has a :attr:`~pyTooling.GitLab.PipelineFile.Input.Type` - ``string``, if it doesn't say -, a
+:attr:`~pyTooling.GitLab.PipelineFile.Input.Default` with the type it is written with, a
+:attr:`~pyTooling.GitLab.PipelineFile.Input.Description`, :attr:`~pyTooling.GitLab.PipelineFile.Input.Options`, a
+:attr:`~pyTooling.GitLab.PipelineFile.Input.Regex` and conditional :attr:`~pyTooling.GitLab.PipelineFile.Input.Rules`.
+It is :attr:`~pyTooling.GitLab.PipelineFile.Input.Required` without a ``default`` key.
+:meth:`~pyTooling.GitLab.PipelineFile.PipelineFile.FromFile` checks that a default matches the type and the options.
+
+A job's ``inputs`` - set when the job is run or retried by hand - are inputs too, in
+:attr:`Job.Inputs <pyTooling.GitLab.PipelineFile.Job.Inputs>`; each needs a default.
+
+A value interpolating an input, as ``$[[ inputs.stage ]]``, is kept as written: it is known when the file is included
+only, so a stage or a needed job written that way isn't checked.
 
 
 .. _DATA/PipelineFile/Lines:
