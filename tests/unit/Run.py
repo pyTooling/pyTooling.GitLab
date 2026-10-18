@@ -728,15 +728,15 @@ class Pipelines(Testcase):
 		"""
 		with self.assertRaises(ValueError) as context:
 			PipelineGroup(None)
-		self.assertEqual("Parameter 'sha' is None.", str(context.exception))
+		self.assertEqual("Parameter 'name' is None.", str(context.exception))
 
 		with self.assertRaises(TypeError) as context:
 			PipelineGroup(1)
-		self.assertEqual("Parameter 'sha' is not of type 'str'.", str(context.exception))
+		self.assertEqual("Parameter 'name' is not of type 'str'.", str(context.exception))
 
 		with self.assertRaises(ValueError) as context:
 			PipelineGroup("")
-		self.assertEqual("Parameter 'sha' is empty.", str(context.exception))
+		self.assertEqual("Parameter 'name' is empty.", str(context.exception))
 
 
 @testsuite("Recorded pipelines")

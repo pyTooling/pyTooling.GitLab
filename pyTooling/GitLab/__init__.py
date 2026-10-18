@@ -517,15 +517,6 @@ class PipelineGroup(CIPipelineGroup):
 		:raises ValueError:   If parameter 'sha' is empty.
 		:raises TypeError:    If an element of parameter 'pipelines' is not of type :class:`Pipeline`.
 		"""
-		if sha is None:
-			raise ValueError("Parameter 'sha' is None.")
-		elif not isinstance(sha, str):
-			ex = TypeError("Parameter 'sha' is not of type 'str'.")
-			ex.add_note(f"Got type '{getFullyQualifiedName(sha)}'.")
-			raise ex
-		elif sha == "":
-			raise ValueError("Parameter 'sha' is empty.")
-
 		super().__init__(sha, pipelines, keyValuePairs=keyValuePairs)
 
 	@readonly
@@ -819,6 +810,12 @@ class Pipeline(CIPipeline, StatusMixin, PipelineContentsMixin):
 		:raises TypeError:     If parameter 'isTag' is not of type :class:`bool`.
 		:raises TypeError:     If parameter 'queuedDuration' is not of type :class:`float`.
 		"""
+		super().__init__(
+			name, createdAt=createdAt, startedAt=startedAt, completedAt=completedAt, keyValuePairs=keyValuePairs,
+			parent=parent
+		)
+		StatusMixin.__init__(self, status, None, url)
+
 		for parameterName, number in (
 			("identifier", identifier),
 			("iid",        iid),
@@ -851,12 +848,6 @@ class Pipeline(CIPipeline, StatusMixin, PipelineContentsMixin):
 			ex = TypeError("Parameter 'queuedDuration' is not of type 'float'.")
 			ex.add_note(f"Got type '{getFullyQualifiedName(queuedDuration)}'.")
 			raise ex
-
-		super().__init__(
-			name, createdAt=createdAt, startedAt=startedAt, completedAt=completedAt, keyValuePairs=keyValuePairs,
-			parent=parent
-		)
-		StatusMixin.__init__(self, status, None, url)
 
 		self._id =             identifier
 		self._iid =            iid
@@ -1173,6 +1164,13 @@ class Job(CIJob, StatusMixin, JobMixin):
 		:raises TypeError:        If parameter 'runnerID' is not of type :class:`int`.
 		:raises TypeError:        If parameter 'runnerDescription' is not of type :class:`str`.
 		"""
+		super().__init__(
+			name, createdAt=createdAt, startedAt=startedAt, completedAt=completedAt, keyValuePairs=keyValuePairs,
+			parent=parent
+		)
+		StatusMixin.__init__(self, status, failureReason, url)
+		JobMixin.__init__(self, identifier, stage, allowFailure, queuedDuration)
+
 		if runnerID is not None and (isinstance(runnerID, bool) or not isinstance(runnerID, int)):
 			ex = TypeError("Parameter 'runnerID' is not of type 'int'.")
 			ex.add_note(f"Got type '{getFullyQualifiedName(runnerID)}'.")
@@ -1192,13 +1190,6 @@ class Job(CIJob, StatusMixin, JobMixin):
 					raise ex
 
 				tagList.append(tag)
-
-		super().__init__(
-			name, createdAt=createdAt, startedAt=startedAt, completedAt=completedAt, keyValuePairs=keyValuePairs,
-			parent=parent
-		)
-		StatusMixin.__init__(self, status, failureReason, url)
-		JobMixin.__init__(self, identifier, stage, allowFailure, queuedDuration)
 
 		self._tags =              tagList
 		self._runnerID =          runnerID
@@ -1456,6 +1447,13 @@ class DownstreamPipeline(CIWorkflow, StatusMixin, JobMixin, PipelineContentsMixi
 		:raises TypeError:          If parameter 'triggerStatus' is not of type :class:`Status`.
 		:raises TypeError:          If parameter 'triggerURL' is not of type :class:`~pyTooling.GenericPath.URL.URL`.
 		"""
+		super().__init__(
+			name, reference=reference, createdAt=createdAt, startedAt=startedAt, completedAt=completedAt,
+			keyValuePairs=keyValuePairs, parent=parent
+		)
+		StatusMixin.__init__(self, status, None, url)
+		JobMixin.__init__(self, identifier, stage, allowFailure, queuedDuration)
+
 		for parameterName, number in (
 			("downstreamID",        downstreamID),
 			("downstreamProjectID", downstreamProjectID)
@@ -1474,13 +1472,6 @@ class DownstreamPipeline(CIWorkflow, StatusMixin, JobMixin, PipelineContentsMixi
 			ex = TypeError("Parameter 'triggerURL' is not of type 'URL'.")
 			ex.add_note(f"Got type '{getFullyQualifiedName(triggerURL)}'.")
 			raise ex
-
-		super().__init__(
-			name, reference=reference, createdAt=createdAt, startedAt=startedAt, completedAt=completedAt,
-			keyValuePairs=keyValuePairs, parent=parent
-		)
-		StatusMixin.__init__(self, status, None, url)
-		JobMixin.__init__(self, identifier, stage, allowFailure, queuedDuration)
 
 		self._downstreamID =        downstreamID
 		self._downstreamProjectID = downstreamProjectID
