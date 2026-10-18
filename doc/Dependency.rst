@@ -130,6 +130,41 @@ reduced to the fields GitLab reports about the pipelines and jobs. They are in t
      - MIT
 
 
+.. _DEP/apptesting:
+
+Application Testing (Optional)
+******************************
+
+Additional Python packages needed for testing the program :program:`pytooling-gitlab` as installed. These packages
+are only needed for developers or on a CI server.
+
+.. rubric:: Manually Installing Application Test Requirements
+
+Use the :file:`tests/app/requirements.txt` file to install all dependencies via ``pip3``. The file will recursively
+install the mandatory dependencies too.
+
+.. tab-set::
+
+   .. tab-item:: Linux/macOS
+      :sync: Linux
+
+      .. code-block:: bash
+
+         pip3 install -U -r tests/app/requirements.txt
+
+   .. tab-item:: Windows
+      :sync: Windows
+
+      .. code-block:: powershell
+
+         pip install -U -r tests\app\requirements.txt
+
+.. rubric:: Dependency List
+
+.. dependency-table:: apptest
+   :caption: Dependencies for application testing.
+
+
 .. _DEP/documentation:
 
 Sphinx Documentation (Optional)

@@ -58,6 +58,9 @@ with WarningCollector() as warnings:
 				"diagram": ["matplotlib >= 3.10"],
 				"sphinx":  ["pyTooling.Sphinx ~= 0.1.0rc3"],
 			},
+			consoleScripts={
+				"pytooling-gitlab": "pyTooling.GitLab.CLI:main"
+			},
 			dataFiles={
 				packageName: ["py.typed"]
 			},

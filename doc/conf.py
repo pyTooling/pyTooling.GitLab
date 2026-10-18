@@ -300,6 +300,7 @@ pyTooling_DocCoverage_Packages = {
 pyTooling_Dependency_Requirements = {
 	"package":       {"file": "../requirements.txt"},
 	"unittest":      {"file": "../tests/unit/requirements.txt"},
+	"apptest":       {"file": "../tests/app/requirements.txt"},
 	"documentation": {"file": "requirements.txt"},
 }
 pyTooling_Dependency_PackageOverrides = "Dependency.PackageOverrides.yaml"
