@@ -37,8 +37,12 @@ The Tree
      - :class:`~pyTooling.GitLab.PipelineFile.Variable`   | a default variable, declared in the top-level ``variables``
      - :class:`~pyTooling.GitLab.PipelineFile.Job`        | a job or a hidden job, in file order
        - :class:`~pyTooling.GitLab.PipelineFile.Need`     | an entry of the job's ``needs``
+         - :class:`~pyTooling.GitLab.PipelineFile.Parallel` | the matrix instances needed
        - :class:`~pyTooling.GitLab.PipelineFile.Rule`     | a rule deciding whether the job is added to a pipeline
        - :class:`~pyTooling.GitLab.PipelineFile.Variable` | a variable of the job
+       - :class:`~pyTooling.GitLab.PipelineFile.Parallel` | the job's ``parallel``: how often it runs, or its matrix
+       - :class:`~pyTooling.GitLab.PipelineFile.Trigger`  | the child pipeline or other project's pipeline it starts
+         - :class:`~pyTooling.GitLab.PipelineFile.Include` | a file of the child pipeline
 
 Every element knows its :attr:`~pyTooling.GitLab.PipelineFile.Base.Parent`, and holds a reference to the configuration
 file it belongs to in :attr:`~pyTooling.GitLab.PipelineFile.Base.PipelineFile`.
@@ -224,6 +228,40 @@ themselves aren't read.
 :class:`~pyTooling.GitLab.PipelineFile.Default` - image, services, tags and the scripts around a job's script. The
 global keywords ``image``, ``services``, ``before_script`` and ``after_script``, deprecated forms of ``default``, are
 read into it too, unless ``default`` sets them.
+
+
+.. _DATA/PipelineFile/Parallel:
+
+Parallel Jobs and Triggers
+**************************
+
+A job's ``parallel`` is a :class:`~pyTooling.GitLab.PipelineFile.Parallel`: a
+:attr:`~pyTooling.GitLab.PipelineFile.Parallel.Count`, or a :attr:`~pyTooling.GitLab.PipelineFile.Parallel.Matrix`
+whose entries map variables to values. :attr:`~pyTooling.GitLab.PipelineFile.Parallel.Combinations` holds one
+combination per instance, each entry contributing the product of its lists, and
+:attr:`~pyTooling.GitLab.PipelineFile.Parallel.InstanceNames` the names GitLab gives the instances:
+
+.. code-block:: yaml
+
+   deploy:                      # deploy: [aws, monitoring], deploy: [aws, app1], deploy: [gcp, data]
+     parallel:
+       matrix:
+         - PROVIDER: aws
+           STACK: [monitoring, app1]
+         - PROVIDER: gcp
+           STACK: data
+   test:                        # test 1/3, test 2/3, test 3/3
+     parallel: 3
+
+A need's :attr:`~pyTooling.GitLab.PipelineFile.Need.Parallel` names the matrix instances it needs, written as
+``needs:parallel:matrix``.
+
+A job's ``trigger`` is a :class:`~pyTooling.GitLab.PipelineFile.Trigger`. A trigger including files starts a **child
+pipeline** - :attr:`~pyTooling.GitLab.PipelineFile.Trigger.Includes` holds the files as
+:class:`~pyTooling.GitLab.PipelineFile.Include`\ s, also the ``artifact`` a job created for a dynamic child pipeline.
+A trigger naming a :attr:`~pyTooling.GitLab.PipelineFile.Trigger.Project` - a string, or ``project`` of a mapping,
+with an optional :attr:`~pyTooling.GitLab.PipelineFile.Trigger.Branch` - starts that **project's pipeline**.
+:attr:`~pyTooling.GitLab.PipelineFile.Trigger.Strategy` says whether the job waits for the pipeline.
 
 
 .. _DATA/PipelineFile/Extends:

@@ -44,8 +44,12 @@ read once into objects:
      - :class:`Variable`   | a default variable, declared in the top-level ``variables``
      - :class:`Job`        | a job or a hidden job, in file order
        - :class:`Need`     | an entry of the job's ``needs``
+         - :class:`Parallel` | the matrix instances needed
        - :class:`Rule`     | a rule deciding whether the job is added to a pipeline
        - :class:`Variable` | a variable of the job
+       - :class:`Parallel` | the job's ``parallel``: how often it runs, or its matrix
+       - :class:`Trigger`  | the child pipeline or other project's pipeline the job starts
+         - :class:`Include` | a file of the child pipeline
 
 Every element knows its parent, the file it belongs to and the line it starts at, so a consumer can name the place a
 finding comes from, as ``.gitlab-ci.yml:42``.
@@ -54,6 +58,7 @@ The model is independent of :mod:`pyTooling.GitLab`, which models a pipeline *ru
 """
 from __future__               import annotations
 
+from itertools                import product
 from pathlib                  import Path
 from typing                   import Any, ClassVar, Generic, Iterable, Iterator, Mapping, Optional as Nullable, Self
 from typing                   import TypeVar, Union
@@ -166,6 +171,15 @@ class IncludeKind(StringEnum):
 	Remote =    "remote"     #: A file at a URL.
 	Template =  "template"   #: A CI/CD template shipped with GitLab.
 	Component = "component"  #: A CI/CD component.
+	Artifact =  "artifact"   #: A file a job of the pipeline created, for a dynamic child pipeline.
+
+
+@export
+class TriggerStrategy(StringEnum):
+	"""How a trigger job's status follows the pipeline it starts, as ``trigger.strategy`` names it."""
+
+	Depend = "depend"  #: The trigger job waits for the pipeline, and reports failed, success or running.
+	Mirror = "mirror"  #: The trigger job waits for the pipeline, and mirrors its status exactly.
 
 
 @export
@@ -1029,6 +1043,8 @@ class Job(Base[PipelineFile]):
 	_tags:             tuple[str, ...]       #: Tags selecting the runner.
 	_environment:      Nullable[str]         #: Name of the environment the job deploys to.
 	_variables:        dict[str, Variable]   #: Variables of the job, by name, in file order.
+	_parallel:         Nullable[Parallel]    #: The job's ``parallel``.
+	_trigger:          Nullable[Trigger]     #: The pipeline the job starts.
 	_extends:          tuple[str, ...]       #: Names of the jobs this job extends.
 	_unresolved:       tuple[str, ...]       #: What the job refers to, but its file doesn't have.
 
@@ -1050,6 +1066,8 @@ class Job(Base[PipelineFile]):
 		environment:      Nullable[str]                = None,
 		variables:        Nullable[Iterable[Variable]] = None,
 		rules:            Nullable[Iterable[Rule]]     = None,
+		parallel:         Nullable[Parallel]           = None,
+		trigger:          Nullable[Trigger]            = None,
 		extends:          Nullable[Iterable[str]]      = None,
 		unresolved:       Nullable[Iterable[str]]      = None,
 		*,
@@ -1058,7 +1076,8 @@ class Job(Base[PipelineFile]):
 		"""
 		Initializes a job.
 
-		A need, a variable or a rule is attached by passing it, or by constructing it with the job as parent.
+		A need, a variable, a rule, a parallel or a trigger is attached by passing it, or by constructing it with the job as
+		parent.
 
 		:param name:             Name of the job, the key it is declared under.
 		:param line:             Line the job's name is written at, starting at 1.
@@ -1078,6 +1097,8 @@ class Job(Base[PipelineFile]):
 		:param variables:        Optional, variables of the job, which are attached to the job. Default: ``None``.
 		:param rules:            Optional, rules deciding whether the job is added to a pipeline, which are attached to
 		                         the job. Default: ``None``.
+		:param parallel:         Optional, the job's ``parallel``, which is attached to the job. Default: ``None``.
+		:param trigger:          Optional, the pipeline the job starts, which is attached to the job. Default: ``None``.
 		:param extends:          Optional, names of the jobs this job extends. Default: ``None``.
 		:param unresolved:       Optional, what the job refers to with ``extends`` or a ``!reference`` tag, but its file
 		                         doesn't have. Default: ``None``.
@@ -1094,6 +1115,8 @@ class Job(Base[PipelineFile]):
 		:raises TypeError:       If an element of parameter 'needs' is not of type :class:`Need`.
 		:raises TypeError:       If an element of parameter 'variables' is not of type :class:`Variable`.
 		:raises TypeError:       If an element of parameter 'rules' is not of type :class:`Rule`.
+		:raises TypeError:       If parameter 'parallel' is not of type :class:`Parallel`.
+		:raises TypeError:       If parameter 'trigger' is not of type :class:`Trigger`.
 		"""
 		super().__init__(line, parent=parent)
 
@@ -1162,6 +1185,8 @@ class Job(Base[PipelineFile]):
 		self._stage =        stage
 		self._needs =        None
 		self._rules =        []
+		self._parallel =     None
+		self._trigger =      None
 		self._when =         when
 		self._allowFailure = allowFailure
 		self._image =        image
@@ -1199,6 +1224,23 @@ class Job(Base[PipelineFile]):
 				self._rules.append(rule)
 				rule.Parent = self
 
+		for parameterName, element, elementClass in (
+			("parallel", parallel, Parallel),
+			("trigger",  trigger,  Trigger)
+		):
+			if element is not None and not isinstance(element, elementClass):
+				ex = TypeError(f"Parameter '{parameterName}' is not of type '{elementClass.__name__}'.")
+				ex.add_note(f"Got type '{getFullyQualifiedName(element)}'.")
+				raise ex
+
+		if parallel is not None:
+			self._parallel = parallel
+			parallel.Parent = self
+
+		if trigger is not None:
+			self._trigger = trigger
+			trigger.Parent = self
+
 		if parent is not None:
 			(parent._hiddenJobs if self.IsHidden else parent._jobs)[name] = self
 
@@ -1214,6 +1256,10 @@ class Job(Base[PipelineFile]):
 
 		for rule in self._rules:
 			rule.Parent = self
+
+		for element in (self._parallel, self._trigger):
+			if element is not None:
+				element.Parent = self
 
 	@readonly
 	def Name(self) -> str:
@@ -1298,6 +1344,24 @@ class Job(Base[PipelineFile]):
 		:returns: The rules, in the order GitLab evaluates them.
 		"""
 		return self._rules
+
+	@readonly
+	def Parallel(self) -> Nullable[Parallel]:
+		"""
+		Read-only property to access the job's ``parallel`` (:attr:`_parallel`).
+
+		:returns: How often the job runs, or its matrix, or ``None`` for a job running once.
+		"""
+		return self._parallel
+
+	@readonly
+	def Trigger(self) -> Nullable[Trigger]:
+		"""
+		Read-only property to access the pipeline the job starts (:attr:`_trigger`).
+
+		:returns: The trigger, or ``None`` for a job running a script.
+		"""
+		return self._trigger
 
 	@readonly
 	def When(self) -> Nullable[When]:
@@ -1527,6 +1591,14 @@ class Job(Base[PipelineFile]):
 		if "rules" in mapping:
 			rules = Rule._FromYAMLEntries(mapping["rules"], f"job '{name}'", path, Base._KeyLine(mapping, "rules"))
 
+		parallel = None
+		if "parallel" in mapping:
+			parallel = Parallel._FromYAML(mapping["parallel"], f"job '{name}'", path, Base._KeyLine(mapping, "parallel"))
+
+		trigger = None
+		if "trigger" in mapping:
+			trigger = Trigger._FromYAML(mapping["trigger"], name, path, Base._KeyLine(mapping, "trigger"))
+
 		extends = mapping.get("extends", ())
 		extends = [extends] if isinstance(extends, str) else extends
 		stage = mapping.get("stage", None)
@@ -1547,6 +1619,8 @@ class Job(Base[PipelineFile]):
 			environment=cls._Name(mapping.get("environment", None)),
 			variables=variables,
 			rules=rules,
+			parallel=parallel,
+			trigger=trigger,
 			extends=[Base._ToText(base) for base in extends],
 			unresolved=unresolved
 		)
@@ -1796,30 +1870,32 @@ class Need(Base[Job]):
 
 	_PARENT_TYPE: ClassVar[ParentTypes] = Job  #: A need is an entry of a job's ``needs``.
 
-	_kind:      NeedKind       #: What the entry refers to.
-	_job:       Nullable[str]  #: Name of the needed job.
-	_artifacts: bool           #: ``True``, if the needed job's artifacts are downloaded.
-	_optional:  bool           #: ``True``, if the needed job may be missing in the pipeline.
-	_pipeline:  Nullable[str]  #: The other pipeline: its ID, or the project whose pipeline's status is mirrored.
-	_project:   Nullable[str]  #: Path of the other project.
-	_ref:       Nullable[str]  #: Reference of the other project, whose latest pipeline's artifacts are downloaded.
+	_kind:      NeedKind            #: What the entry refers to.
+	_job:       Nullable[str]       #: Name of the needed job.
+	_artifacts: bool                #: ``True``, if the needed job's artifacts are downloaded.
+	_optional:  bool                #: ``True``, if the needed job may be missing in the pipeline.
+	_pipeline:  Nullable[str]       #: The other pipeline: its ID, or the project whose pipeline's status is mirrored.
+	_project:   Nullable[str]       #: Path of the other project.
+	_ref:       Nullable[str]       #: Reference of the other project, whose latest pipeline's artifacts are downloaded.
+	_parallel:  Nullable[Parallel]  #: The matrix instances of the needed job, which are needed.
 
 	_KEYS: ClassVar[tuple[str, ...]] = (
-		"job", "artifacts", "optional", "pipeline", "project", "ref"
+		"job", "artifacts", "optional", "pipeline", "project", "ref", "parallel"
 	)  #: Keys of an entry as mapping.
 
 	def __init__(
 		self,
 		job:       Nullable[str],
 		line:      int,
-		kind:      NeedKind      = NeedKind.Job,
-		artifacts: bool          = True,
-		optional:  bool          = False,
-		pipeline:  Nullable[str] = None,
-		project:   Nullable[str] = None,
-		ref:       Nullable[str] = None,
+		kind:      NeedKind           = NeedKind.Job,
+		artifacts: bool               = True,
+		optional:  bool               = False,
+		pipeline:  Nullable[str]      = None,
+		project:   Nullable[str]      = None,
+		ref:       Nullable[str]      = None,
+		parallel:  Nullable[Parallel] = None,
 		*,
-		parent:    Nullable[Job] = None
+		parent:    Nullable[Job]      = None
 	) -> None:
 		"""
 		Initializes an entry of a job's ``needs``.
@@ -1833,6 +1909,8 @@ class Need(Base[Job]):
 		                    Default: ``None``.
 		:param project:     Optional, path of the other project. Default: ``None``.
 		:param ref:         Optional, reference of the other project. Default: ``None``.
+		:param parallel:    Optional, the matrix instances of the needed job, which are needed, which is attached to
+		                    the need. Default: ``None``, for every instance.
 		:param parent:      Optional, reference to the job whose ``needs`` holds the entry. Default: ``None``.
 		:raises ValueError: If parameter 'kind' is ``None``.
 		:raises TypeError:  If parameter 'kind' is not of type :class:`NeedKind`.
@@ -1841,6 +1919,7 @@ class Need(Base[Job]):
 		:raises ValueError: If parameter 'job' is ``None``, but the kind names a job.
 		:raises ValueError: If parameter 'pipeline' is ``None``, but the kind refers to another pipeline.
 		:raises ValueError: If parameter 'project' or 'ref' is ``None``, but the kind refers to another project's job.
+		:raises TypeError:  If parameter 'parallel' is not of type :class:`Parallel`.
 		"""
 		super().__init__(line, parent=parent)
 
@@ -1889,12 +1968,38 @@ class Need(Base[Job]):
 		self._pipeline =  pipeline
 		self._project =   project
 		self._ref =       ref
+		self._parallel =  None
+
+		if parallel is not None:
+			if not isinstance(parallel, Parallel):
+				ex = TypeError("Parameter 'parallel' is not of type 'Parallel'.")
+				ex.add_note(f"Got type '{getFullyQualifiedName(parallel)}'.")
+				raise ex
+
+			self._parallel = parallel
+			parallel.Parent = self
 
 		if parent is not None:
 			if parent._needs is None:
 				parent._needs = []
 
 			parent._needs.append(self)
+
+	@Base.Parent.setter
+	def Parent(self, value: Job) -> None:
+		Base.Parent.fset(self, value)
+
+		if self._parallel is not None:
+			self._parallel.Parent = self
+
+	@readonly
+	def Parallel(self) -> Nullable[Parallel]:
+		"""
+		Read-only property to access the matrix instances of the needed job, which are needed (:attr:`_parallel`).
+
+		:returns: The instances' matrix, or ``None`` if every instance is needed.
+		"""
+		return self._parallel
 
 	@readonly
 	def Kind(self) -> NeedKind:
@@ -2043,8 +2148,16 @@ class Need(Base[Job]):
 		elif texts["ref"] is None and kind is NeedKind.ProjectJob:
 			raise PipelineFileError(f"Need of job '{jobName}' with key 'project' has no 'ref' key.", path, line)
 
+		parallel = None
+		if "parallel" in entry:
+			keyLine = Base._KeyLine(entry, "parallel")
+			parallel = Parallel._FromYAML(entry["parallel"], f"a need of job '{jobName}'", path, keyLine)
+			if parallel._count is not None:
+				raise PipelineFileError(f"Key 'parallel' of a need of job '{jobName}' has no 'matrix' key.", path, line)
+
 		return cls(
-			texts["job"], line, kind, flags["artifacts"], flags["optional"], texts["pipeline"], texts["project"], texts["ref"]
+			texts["job"], line, kind, flags["artifacts"], flags["optional"],
+			texts["pipeline"], texts["project"], texts["ref"], parallel
 		)
 
 	@classmethod
@@ -2172,20 +2285,202 @@ class Workflow(Base[PipelineFile]):
 
 
 @export
-class Include(Base[PipelineFile]):
+class Trigger(Base[Job]):
+	"""
+	A job's ``trigger``: the child pipeline, or the other project's pipeline, the job starts.
+
+	A child pipeline runs the configuration of the files in :attr:`Includes`; another project's pipeline runs that
+	project's configuration on :attr:`Branch`.
+	"""
+
+	_PARENT_TYPE: ClassVar[ParentTypes] = Job  #: A trigger belongs to a job.
+
+	_project:  Nullable[str]              #: Path of the other project, whose pipeline is started.
+	_branch:   Nullable[str]              #: Branch of the other project.
+	_strategy: Nullable[TriggerStrategy]  #: How the job's status follows the started pipeline.
+	_includes: list[Include]              #: Files of the child pipeline's configuration.
+
+	def __init__(
+		self,
+		line:     int,
+		project:  Nullable[str]               = None,
+		branch:   Nullable[str]               = None,
+		strategy: Nullable[TriggerStrategy]   = None,
+		includes: Nullable[Iterable[Include]] = None,
+		*,
+		parent:   Nullable[Job]               = None
+	) -> None:
+		"""
+		Initializes a job's ``trigger``.
+
+		:param line:       Line the ``trigger`` key is written at, starting at 1.
+		:param project:    Optional, path of the other project, whose pipeline is started. Default: ``None``.
+		:param branch:     Optional, branch of the other project. Default: ``None``, for its default branch.
+		:param strategy:   Optional, how the job's status follows the started pipeline. Default: ``None``, for a job
+		                   succeeding as soon as the pipeline is created.
+		:param includes:   Optional, files of the child pipeline's configuration, which are attached to the trigger.
+		                   Default: ``None``.
+		:param parent:     Optional, reference to the job. Default: ``None``.
+		:raises TypeError: If parameter 'project' or 'branch' is not of type :class:`str`.
+		:raises TypeError: If parameter 'strategy' is not of type :class:`TriggerStrategy`.
+		:raises TypeError: If an element of parameter 'includes' is not of type :class:`Include`.
+		"""
+		super().__init__(line, parent=parent)
+
+		for parameterName, text in (
+			("project", project),
+			("branch",  branch)
+		):
+			if text is not None and not isinstance(text, str):
+				ex = TypeError(f"Parameter '{parameterName}' is not of type 'str'.")
+				ex.add_note(f"Got type '{getFullyQualifiedName(text)}'.")
+				raise ex
+
+		if strategy is not None and not isinstance(strategy, TriggerStrategy):
+			ex = TypeError("Parameter 'strategy' is not of type 'TriggerStrategy'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(strategy)}'.")
+			raise ex
+
+		self._project =  project
+		self._branch =   branch
+		self._strategy = strategy
+		self._includes = []
+
+		if includes is not None:
+			for include in includes:
+				if not isinstance(include, Include):
+					ex = TypeError("An element of parameter 'includes' is not of type 'Include'.")
+					ex.add_note(f"Got type '{getFullyQualifiedName(include)}'.")
+					raise ex
+
+				self._includes.append(include)
+				include.Parent = self
+
+		if parent is not None:
+			parent._trigger = self
+
+	@Base.Parent.setter
+	def Parent(self, value: Job) -> None:
+		Base.Parent.fset(self, value)
+
+		for include in self._includes:
+			include.Parent = self
+
+	@readonly
+	def Project(self) -> Nullable[str]:
+		"""
+		Read-only property to access the path of the other project, whose pipeline is started (:attr:`_project`).
+
+		:returns: The project's path, or ``None`` for a child pipeline.
+		"""
+		return self._project
+
+	@readonly
+	def Branch(self) -> Nullable[str]:
+		"""
+		Read-only property to access the branch of the other project (:attr:`_branch`).
+
+		:returns: The branch, or ``None`` for the project's default branch.
+		"""
+		return self._branch
+
+	@readonly
+	def Strategy(self) -> Nullable[TriggerStrategy]:
+		"""
+		Read-only property to access how the job's status follows the started pipeline (:attr:`_strategy`).
+
+		:returns: The strategy, or ``None`` if the trigger doesn't say.
+		"""
+		return self._strategy
+
+	@readonly
+	def Includes(self) -> list[Include]:
+		"""
+		Read-only property to access the files of the child pipeline's configuration (:attr:`_includes`).
+
+		:returns: The files, in file order; empty for another project's pipeline.
+		"""
+		return self._includes
+
+	@readonly
+	def IsChildPipeline(self) -> bool:
+		"""
+		Read-only property to return whether the job starts a child pipeline.
+
+		:returns: ``True``, if the trigger includes files; ``False`` for another project's pipeline.
+		"""
+		return len(self._includes) > 0
+
+	@classmethod
+	def _FromYAML(cls, value: Any, jobName: str, path: Path, line: int) -> Self:
+		"""
+		Read a job's ``trigger``: another project's path, or a mapping with ``include`` or ``project``.
+
+		:param value:              The key's value.
+		:param jobName:            Name of the job, for a message.
+		:param path:               Path to the configuration file.
+		:param line:               Line the ``trigger`` key is written at, starting at 1.
+		:returns:                  The trigger.
+		:raises PipelineFileError: If the value is neither a project's path nor a mapping with ``include`` or
+		                           ``project``.
+		:raises PipelineFileError: If key ``strategy`` is not a value GitLab knows. |br|
+		                           The note lists the allowed values.
+		:raises PipelineFileError: If an include is malformed.
+		"""
+		if isinstance(value, (str, ScalarString)):
+			return cls(line, project=Base._ToText(value))
+		elif not isinstance(value, CommentedMap) or ("include" not in value and "project" not in value):
+			ex = PipelineFileError(
+				f"Key 'trigger' of job '{jobName}' is neither a project nor a mapping with 'include' or 'project'.", path, line
+			)
+			ex.add_note(f"Got '{Base._ToPython(value)}'.")
+			raise ex
+
+		strategy = None
+		if (strategyValue := value.get("strategy", None)) is not None:
+			try:
+				strategy = TriggerStrategy.Parse(Base._ToText(strategyValue))
+			except ValueError as cause:
+				ex = PipelineFileError(
+					f"Key 'strategy' of the trigger of job '{jobName}' is not a known value.",
+					path, Base._KeyLine(value, "strategy")
+				)
+				ex.add_note(f"Got '{strategyValue}'.")
+				ex.add_note(f"Allowed values: {', '.join(member.value for member in TriggerStrategy)}.")
+				raise ex from cause
+
+		includes = None
+		if "include" in value:
+			includes = Include._FromYAMLEntries(value["include"], path, Base._KeyLine(value, "include"))
+
+		project = value.get("project", None)
+		branch =  value.get("branch", None)
+		return cls(
+			line,
+			project=None if project is None else Base._ToText(project),
+			branch=None if branch is None else Base._ToText(branch),
+			strategy=strategy,
+			includes=includes
+		)
+
+
+@export
+class Include(Base[Union[PipelineFile, Trigger]]):
 	"""
 	An entry of ``include``, which adds the configuration of other files.
 
 	:attr:`Kind` says where the files come from, :attr:`Location` names them: a path of the same repository, a URL, a
-	template's name, a component's reference, or the path of another project, whose files are in :attr:`Files`.
+	template's name, a component's reference, the path of another project, whose files are in :attr:`Files`, or the
+	artifact of the job :attr:`ArtifactJob`.
 	"""
 
-	_PARENT_TYPE: ClassVar[ParentTypes] = PipelineFile  #: An include belongs to a configuration file.
+	_PARENT_TYPE: ClassVar[ParentTypes] = (PipelineFile, Trigger)  #: Included by a configuration file or a trigger.
 
 	_kind:     IncludeKind        #: Where the included files come from.
 	_location: str                #: Path, URL, template's name, component's reference, or project's path.
 	_ref:      Nullable[str]      #: Reference of the project the files are read from.
 	_files:    tuple[str, ...]    #: Paths of the files of another project.
+	_job:      Nullable[str]      #: Name of the job, whose artifact is included.
 	_inputs:   dict[str, ValueT]  #: Inputs passed to the included files, by name.
 	_rules:    list[Rule]         #: Rules deciding whether the files are included.
 
@@ -2196,12 +2491,13 @@ class Include(Base[PipelineFile]):
 		kind:     IncludeKind,
 		location: str,
 		line:     int,
-		files:    Nullable[Iterable[str]]        = None,
-		ref:      Nullable[str]                  = None,
-		inputs:   Nullable[Mapping[str, ValueT]] = None,
-		rules:    Nullable[Iterable[Rule]]       = None,
+		files:    Nullable[Iterable[str]]                = None,
+		ref:      Nullable[str]                          = None,
+		inputs:   Nullable[Mapping[str, ValueT]]         = None,
+		rules:    Nullable[Iterable[Rule]]               = None,
+		job:      Nullable[str]                          = None,
 		*,
-		parent:   Nullable[PipelineFile]         = None
+		parent:   Nullable[Union[PipelineFile, Trigger]] = None
 	) -> None:
 		"""
 		Initializes an entry of ``include``.
@@ -2214,10 +2510,11 @@ class Include(Base[PipelineFile]):
 		:param inputs:      Optional, inputs passed to the included files, by name. Default: ``None``.
 		:param rules:       Optional, rules deciding whether the files are included, which are attached to the entry.
 		                    Default: ``None``.
-		:param parent:      Optional, reference to the configuration file. Default: ``None``.
+		:param job:         Optional, name of the job, whose artifact is included. Default: ``None``.
+		:param parent:      Optional, reference to the configuration file or the trigger. Default: ``None``.
 		:raises ValueError: If parameter 'kind' or 'location' is ``None``.
 		:raises TypeError:  If parameter 'kind' is not of type :class:`IncludeKind`.
-		:raises TypeError:  If parameter 'location' or 'ref' is not of type :class:`str`.
+		:raises TypeError:  If parameter 'location', 'ref' or 'job' is not of type :class:`str`.
 		:raises ValueError: If parameter 'location' is empty.
 		:raises TypeError:  If an element of parameter 'files' is not of type :class:`str`.
 		:raises TypeError:  If an element of parameter 'rules' is not of type :class:`Rule`.
@@ -2240,10 +2537,14 @@ class Include(Base[PipelineFile]):
 		elif location == "":
 			raise ValueError("Parameter 'location' is empty.")
 
-		if ref is not None and not isinstance(ref, str):
-			ex = TypeError("Parameter 'ref' is not of type 'str'.")
-			ex.add_note(f"Got type '{getFullyQualifiedName(ref)}'.")
-			raise ex
+		for parameterName, text in (
+			("ref", ref),
+			("job", job)
+		):
+			if text is not None and not isinstance(text, str):
+				ex = TypeError(f"Parameter '{parameterName}' is not of type 'str'.")
+				ex.add_note(f"Got type '{getFullyQualifiedName(text)}'.")
+				raise ex
 
 		self._files = () if files is None else tuple(files)
 		for file in self._files:
@@ -2255,6 +2556,7 @@ class Include(Base[PipelineFile]):
 		self._kind =     kind
 		self._location = location
 		self._ref =      ref
+		self._job =      job
 		self._inputs =   {} if inputs is None else dict(inputs)
 		self._rules =    []
 
@@ -2313,6 +2615,15 @@ class Include(Base[PipelineFile]):
 		:returns: The paths of ``file``, in file order.
 		"""
 		return self._files
+
+	@readonly
+	def ArtifactJob(self) -> Nullable[str]:
+		"""
+		Read-only property to access the name of the job, whose artifact is included (:attr:`_job`).
+
+		:returns: The ``job`` key of an artifact's include, or ``None``.
+		"""
+		return self._job
 
 	@readonly
 	def Inputs(self) -> dict[str, ValueT]:
@@ -2395,12 +2706,14 @@ class Include(Base[PipelineFile]):
 			rules = Rule._FromYAMLEntries(entry["rules"], "an include", path, Base._KeyLine(entry, "rules"))
 
 		ref = entry.get("ref", None)
+		job = entry.get("job", None)
 		return cls(
 			kind, Base._ToText(entry[kinds[0]]), line,
 			files=files,
 			ref=None if ref is None else Base._ToText(ref),
 			inputs=None if inputs is None else Base._ToPython(inputs),
-			rules=rules
+			rules=rules,
+			job=None if job is None else Base._ToText(job)
 		)
 
 	@classmethod
@@ -2856,3 +3169,200 @@ class Default(Base[PipelineFile]):
 			beforeScript=Job._Lines(value("before_script"), "before_script", "the default", owner, path),
 			afterScript=Job._Lines(value("after_script"), "after_script", "the default", owner, path)
 		)
+
+
+@export
+class Parallel(Base[Union[Job, Need]]):
+	"""
+	A ``parallel`` key: how often a job runs, or the matrix of variables its instances run with.
+
+	A job runs :attr:`Count` times, or once per combination of :attr:`Matrix`: an entry maps variables to values, and
+	contributes the product of their lists. A need's ``parallel`` names the matrix instances it needs.
+	"""
+
+	_PARENT_TYPE: ClassVar[ParentTypes] = (Job, Need)  #: A parallel belongs to a job or a need.
+
+	_count:  Nullable[int]                           #: How often the job runs.
+	_matrix: tuple[dict[str, tuple[str, ...]], ...]  #: Entries of the matrix: variables to their values.
+
+	def __init__(
+		self,
+		line:   int,
+		count:  Nullable[int]                                   = None,
+		matrix: Nullable[Iterable[Mapping[str, Iterable[str]]]] = None,
+		*,
+		parent: Nullable[Union[Job, Need]]                      = None
+	) -> None:
+		"""
+		Initializes a ``parallel`` key.
+
+		:param line:        Line the ``parallel`` key is written at, starting at 1.
+		:param count:       Optional, how often the job runs. Default: ``None``, for a matrix.
+		:param matrix:      Optional, entries of the matrix, each mapping variables to their values. Default: ``None``,
+		                    for a count.
+		:param parent:      Optional, reference to the job or the need. Default: ``None``.
+		:raises ValueError: If both or neither of parameters 'count' and 'matrix' are given.
+		:raises TypeError:  If parameter 'count' is not of type :class:`int`.
+		:raises ValueError: If parameter 'count' is out of range 1..200.
+		:raises TypeError:  If an entry of parameter 'matrix' is not a mapping, or a variable's values are not strings.
+		"""
+		super().__init__(line, parent=parent)
+
+		if (count is None) == (matrix is None):
+			raise ValueError("Parameters 'count' and 'matrix' are both given, or both None.")
+		elif count is not None and (not isinstance(count, int) or isinstance(count, bool)):
+			ex = TypeError("Parameter 'count' is not of type 'int'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(count)}'.")
+			raise ex
+		elif count is not None and not (1 <= count <= 200):
+			ex = ValueError("Parameter 'count' is out of range 1..200.")
+			ex.add_note(f"Got value '{count}'.")
+			raise ex
+
+		entries = []
+		for entry in () if matrix is None else matrix:
+			if not isinstance(entry, Mapping):
+				ex = TypeError("An entry of parameter 'matrix' is not a mapping.")
+				ex.add_note(f"Got type '{getFullyQualifiedName(entry)}'.")
+				raise ex
+
+			variables = {}
+			for variable, values in entry.items():
+				variables[variable] = tuple(values)
+				if not isinstance(variable, str) or any(not isinstance(value, str) for value in variables[variable]):
+					ex = TypeError(f"Variable '{variable}' of parameter 'matrix' has values not of type 'str'.")
+					ex.add_note(f"Got '{variables[variable]}'.")
+					raise ex
+
+			entries.append(variables)
+
+		self._count =  count
+		self._matrix = tuple(entries)
+
+		if parent is not None:
+			parent._parallel = self
+
+	@readonly
+	def Count(self) -> Nullable[int]:
+		"""
+		Read-only property to access how often the job runs (:attr:`_count`).
+
+		:returns: The count of ``parallel: N``, or ``None`` for a matrix.
+		"""
+		return self._count
+
+	@readonly
+	def Matrix(self) -> tuple[dict[str, tuple[str, ...]], ...]:
+		"""
+		Read-only property to access the entries of the matrix (:attr:`_matrix`).
+
+		:returns: The entries, each mapping variables to their values, in file order; empty for a count.
+		"""
+		return self._matrix
+
+	@readonly
+	def IsMatrix(self) -> bool:
+		"""
+		Read-only property to return whether the key is a matrix.
+
+		:returns: ``True`` for ``parallel: matrix``, ``False`` for ``parallel: N``.
+		"""
+		return self._count is None
+
+	@readonly
+	def Combinations(self) -> list[dict[str, str]]:
+		"""
+		Read-only property to return the combinations of the matrix, one per instance.
+
+		:returns: The combinations, each mapping the variables to a value, in the order GitLab creates the instances.
+		"""
+		combinations = []
+		for entry in self._matrix:
+			for values in product(*entry.values()):
+				combinations.append(dict(zip(entry, values)))
+
+		return combinations
+
+	@readonly
+	def InstanceNames(self) -> list[str]:
+		"""
+		Read-only property to return the names GitLab gives the instances.
+
+		:returns: The names, as ``test 1/3`` for a count, or ``deploy: [aws, app1]`` for a matrix.
+		"""
+		if isinstance(self._parent, Need):
+			name = self._parent._job
+		else:
+			name = "" if self._parent is None else self._parent._name
+
+		if self._count is not None:
+			return [self._InstanceName(name, self._count, {"CI_NODE_INDEX": index}) for index in range(1, self._count + 1)]
+
+		return [self._InstanceName(name, None, combination) for combination in self.Combinations]
+
+	@staticmethod
+	def _InstanceName(name: str, count: Nullable[int], dimensions: Mapping[str, Any]) -> str:
+		"""
+		Return the name GitLab gives an instance.
+
+		:param name:       Name of the job.
+		:param count:      The count of ``parallel: N``, or ``None`` for a matrix.
+		:param dimensions: The instance's variables, ``CI_NODE_INDEX`` for ``parallel: N``.
+		:returns:          The name, as ``test 1/3`` for a count, or ``deploy: [aws, app1]`` for a matrix.
+		"""
+		if count is not None:
+			return f"{name} {dimensions['CI_NODE_INDEX']}/{count}"
+
+		return f"{name}: [{', '.join(str(value) for value in dimensions.values())}]"
+
+	@classmethod
+	def _FromYAML(cls, value: Any, owner: str, path: Path, line: int) -> Self:
+		"""
+		Read a ``parallel`` key: a count, or a mapping with key ``matrix``.
+
+		:param value:              The key's value.
+		:param owner:              The element holding the key, for a message, as ``job 'test'``.
+		:param path:               Path to the configuration file.
+		:param line:               Line the ``parallel`` key is written at, starting at 1.
+		:returns:                  The parallel.
+		:raises PipelineFileError: If the value is neither a count nor a mapping with key ``matrix``.
+		:raises PipelineFileError: If the count is out of range 1..200.
+		:raises PipelineFileError: If the matrix is not a list of mappings of variables to a value or a list of values.
+		"""
+		count = Base._ToPython(value)
+		if isinstance(count, int) and not isinstance(count, bool):
+			if not (1 <= count <= 200):
+				ex = PipelineFileError(f"Key 'parallel' of {owner} is out of range 1..200.", path, line)
+				ex.add_note(f"Got '{count}'.")
+				raise ex
+
+			return cls(line, count)
+		elif not isinstance(value, CommentedMap) or "matrix" not in value:
+			ex = PipelineFileError(f"Key 'parallel' of {owner} is neither a count nor a mapping with 'matrix'.", path, line)
+			ex.add_note(f"Got '{count}'.")
+			raise ex
+
+		entries = value["matrix"]
+		if not isinstance(entries, CommentedSeq) or any(not isinstance(entry, CommentedMap) for entry in entries):
+			ex = PipelineFileError(f"Key 'parallel.matrix' of {owner} is not a list of mappings.", path, line)
+			ex.add_note(f"Got '{Base._ToPython(entries)}'.")
+			raise ex
+
+		matrix = []
+		for entry in entries:
+			variables = {}
+			for variable, values in entry.items():
+				values = values if isinstance(values, CommentedSeq) else [values]
+				if any(isinstance(item, (CommentedMap, CommentedSeq)) for item in values):
+					ex = PipelineFileError(
+						f"Variable '{variable}' of the matrix of {owner} is neither a value nor a list of values.",
+						path, Base._KeyLine(entry, variable)
+					)
+					ex.add_note(f"Got '{Base._ToPython(values)}'.")
+					raise ex
+
+				variables[str(variable)] = [Base._ToText(item) for item in values]
+
+			matrix.append(variables)
+
+		return cls(line, matrix=matrix)
