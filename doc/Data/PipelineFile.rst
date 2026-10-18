@@ -115,7 +115,7 @@ documentation needs are read too:
 * :attr:`~pyTooling.GitLab.PipelineFile.Job.Script`, :attr:`~pyTooling.GitLab.PipelineFile.Job.BeforeScript` and
   :attr:`~pyTooling.GitLab.PipelineFile.Job.AfterScript` - the lines, a single line as a list of one, nested lists
   flattened;
-* :attr:`~pyTooling.GitLab.PipelineFile.Job.When` - a :class:`~pyTooling.GitLab.PipelineFile.When`;
+* :attr:`~pyTooling.GitLab.PipelineFile.Job.When` - a :class:`~pyTooling.CI.RuleOutcome`;
 * :attr:`~pyTooling.GitLab.PipelineFile.Job.AllowFailure` and
   :attr:`~pyTooling.GitLab.PipelineFile.Job.AllowedExitCodes` - ``allow_failure`` as a boolean, or as a mapping of
   ``exit_codes``;

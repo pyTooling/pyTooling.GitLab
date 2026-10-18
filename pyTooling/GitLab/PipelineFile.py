@@ -71,7 +71,7 @@ from typing                   import Self, TypeVar, Union
 
 from pyTooling.CI             import DependencyMixin, Job as CIJob, JobGroup, Matrix as CIMatrix
 from pyTooling.CI             import MatrixJob as CIMatrixJob, MatrixWorkflow as CIMatrixWorkflow
-from pyTooling.CI             import Pipeline as CIPipeline, Workflow as CIWorkflow
+from pyTooling.CI             import Pipeline as CIPipeline, RuleOutcome, Workflow as CIWorkflow
 
 from pyTooling.Common         import getFullyQualifiedName, StringEnum
 from pyTooling.Decorators     import export, readonly
@@ -161,18 +161,6 @@ class PipelineFileError(GitLabError):
 		:returns: The line, starting at 1, or ``None`` if the problem isn't tied to a line.
 		"""
 		return self._line
-
-
-@export
-class When(StringEnum):
-	"""When a job runs, as ``when`` names it."""
-
-	OnSuccess = "on_success"  #: When no job of an earlier stage failed.
-	OnFailure = "on_failure"  #: When a job of an earlier stage failed.
-	Never =     "never"       #: Never.
-	Always =    "always"      #: Whatever the jobs of earlier stages did.
-	Manual =    "manual"      #: When started by hand.
-	Delayed =   "delayed"     #: After the time given by ``start_in``.
 
 
 @export
@@ -1342,26 +1330,26 @@ class Job(Base[PipelineFile]):
 
 	_PARENT_TYPE: ClassVar[ParentTypes] = PipelineFile  #: A job is contained in a configuration file.
 
-	_name:             str                   #: Name of the job, the key it is declared under.
-	_stage:            str                   #: Stage the job runs in.
-	_needs:            Nullable[list[Need]]  #: Entries of the job's ``needs``, or ``None`` without a ``needs`` key.
-	_rules:            list[Rule]            #: Rules deciding whether the job is added to a pipeline.
-	_when:             Nullable[When]        #: When the job runs.
-	_allowFailure:     Nullable[bool]        #: ``True``, if the pipeline continues when the job fails.
-	_allowedExitCodes: tuple[int, ...]       #: Exit codes, with which the job may fail.
-	_script:           tuple[str, ...]       #: Lines of the job's ``script``.
-	_beforeScript:     tuple[str, ...]       #: Lines of the job's ``before_script``.
-	_afterScript:      tuple[str, ...]       #: Lines of the job's ``after_script``.
-	_image:            Nullable[str]         #: Image of the container the job runs in.
-	_services:         tuple[str, ...]       #: Images of the service containers.
-	_tags:             tuple[str, ...]       #: Tags selecting the runner.
-	_environment:      Nullable[str]         #: Name of the environment the job deploys to.
-	_variables:        dict[str, Variable]   #: Variables of the job, by name, in file order.
-	_inputs:           dict[str, Input]      #: Inputs of the job, by name, in file order.
-	_parallel:         Nullable[Parallel]    #: The job's ``parallel``.
-	_trigger:          Nullable[Trigger]     #: The pipeline the job starts.
-	_extends:          tuple[str, ...]       #: Names of the jobs this job extends.
-	_unresolved:       tuple[str, ...]       #: What the job refers to, but its file doesn't have.
+	_name:             str                    #: Name of the job, the key it is declared under.
+	_stage:            str                    #: Stage the job runs in.
+	_needs:            Nullable[list[Need]]   #: Entries of the job's ``needs``, or ``None`` without a ``needs`` key.
+	_rules:            list[Rule]             #: Rules deciding whether the job is added to a pipeline.
+	_when:             Nullable[RuleOutcome]  #: When the job runs.
+	_allowFailure:     Nullable[bool]         #: ``True``, if the pipeline continues when the job fails.
+	_allowedExitCodes: tuple[int, ...]        #: Exit codes, with which the job may fail.
+	_script:           tuple[str, ...]        #: Lines of the job's ``script``.
+	_beforeScript:     tuple[str, ...]        #: Lines of the job's ``before_script``.
+	_afterScript:      tuple[str, ...]        #: Lines of the job's ``after_script``.
+	_image:            Nullable[str]          #: Image of the container the job runs in.
+	_services:         tuple[str, ...]        #: Images of the service containers.
+	_tags:             tuple[str, ...]        #: Tags selecting the runner.
+	_environment:      Nullable[str]          #: Name of the environment the job deploys to.
+	_variables:        dict[str, Variable]    #: Variables of the job, by name, in file order.
+	_inputs:           dict[str, Input]       #: Inputs of the job, by name, in file order.
+	_parallel:         Nullable[Parallel]     #: The job's ``parallel``.
+	_trigger:          Nullable[Trigger]      #: The pipeline the job starts.
+	_extends:          tuple[str, ...]        #: Names of the jobs this job extends.
+	_unresolved:       tuple[str, ...]        #: What the job refers to, but its file doesn't have.
 
 	def __init__(
 		self,
@@ -1369,7 +1357,7 @@ class Job(Base[PipelineFile]):
 		line:             int,
 		stage:            str                          = "test",
 		needs:            Nullable[Iterable[Need]]     = None,
-		when:             Nullable[When]               = None,
+		when:             Nullable[RuleOutcome]        = None,
 		allowFailure:     Nullable[bool]               = None,
 		allowedExitCodes: Nullable[Iterable[int]]      = None,
 		script:           Nullable[Iterable[str]]      = None,
@@ -1423,7 +1411,7 @@ class Job(Base[PipelineFile]):
 		:raises ValueError:      If parameter 'name' or 'stage' is ``None``.
 		:raises TypeError:       If parameter 'name' or 'stage' is not of type :class:`str`.
 		:raises ValueError:      If parameter 'name' or 'stage' is empty.
-		:raises TypeError:       If parameter 'when' is not of type :class:`When`.
+		:raises TypeError:       If parameter 'when' is not of type :class:`~pyTooling.CI.RuleOutcome`.
 		:raises TypeError:       If parameter 'allowFailure' is not of type :class:`bool`.
 		:raises TypeError:       If parameter 'image' or 'environment' is not of type :class:`str`.
 		:raises TypeError:       If an element of parameter 'allowedExitCodes' is not of type :class:`int`.
@@ -1451,8 +1439,8 @@ class Job(Base[PipelineFile]):
 			elif text == "":
 				raise ValueError(f"Parameter '{parameterName}' is empty.")
 
-		if when is not None and not isinstance(when, When):
-			ex = TypeError("Parameter 'when' is not of type 'When'.")
+		if when is not None and not isinstance(when, RuleOutcome):
+			ex = TypeError("Parameter 'when' is not of type 'RuleOutcome'.")
 			ex.add_note(f"Got type '{getFullyQualifiedName(when)}'.")
 			raise ex
 
@@ -1717,7 +1705,7 @@ class Job(Base[PipelineFile]):
 		return self._trigger
 
 	@readonly
-	def When(self) -> Nullable[When]:
+	def When(self) -> Nullable[RuleOutcome]:
 		"""
 		Read-only property to access when the job runs (:attr:`_when`).
 
@@ -1892,13 +1880,13 @@ class Job(Base[PipelineFile]):
 		when = None
 		if (whenValue := mapping.get("when", None)) is not None:
 			try:
-				when = When.Parse(Base._ToText(whenValue))
+				when = RuleOutcome.Parse(Base._ToText(whenValue))
 			except ValueError as cause:
 				ex = PipelineFileError(
 					f"Key 'when' of job '{name}' is not a known value.", path, Base._KeyLine(mapping, "when")
 				)
 				ex.add_note(f"Got '{whenValue}'.")
-				ex.add_note(f"Allowed values: {', '.join(member.value for member in When)}.")
+				ex.add_note(f"Allowed values: {', '.join(member.value for member in RuleOutcome)}.")
 				raise ex from cause
 
 		allowFailure = Base._ToPython(mapping.get("allow_failure", None))
@@ -3102,24 +3090,24 @@ class Rule(Base[Union[Job, Workflow, Include]]):
 
 	_PARENT_TYPE: ClassVar[ParentTypes] = (Job, Workflow, Include)  #: A rule belongs to a job, a workflow or an include.
 
-	_condition:    Nullable[str]    #: Expression of the rule's ``if``.
-	_changes:      tuple[str, ...]  #: Paths of the rule's ``changes``.
-	_compareTo:    Nullable[str]    #: Reference ``changes`` is compared to.
-	_exists:       tuple[str, ...]  #: Paths of the rule's ``exists``.
-	_when:         Nullable[When]   #: When the job runs, if the rule matches.
-	_allowFailure: Nullable[bool]   #: ``True``, if the pipeline continues when the job fails, if the rule matches.
-	_variables:    dict[str, str]   #: Variables set, if the rule matches, by name.
+	_condition:    Nullable[str]          #: Expression of the rule's ``if``.
+	_changes:      tuple[str, ...]        #: Paths of the rule's ``changes``.
+	_compareTo:    Nullable[str]          #: Reference ``changes`` is compared to.
+	_exists:       tuple[str, ...]        #: Paths of the rule's ``exists``.
+	_when:         Nullable[RuleOutcome]  #: When the job runs, if the rule matches.
+	_allowFailure: Nullable[bool]         #: ``True``, if the pipeline continues when the job fails, if the rule matches.
+	_variables:    dict[str, str]         #: Variables set, if the rule matches, by name.
 
 	def __init__(
 		self,
 		line:         int,
-		condition:    Nullable[str]                           = None,
-		changes:      Nullable[Iterable[str]]                 = None,
-		compareTo:    Nullable[str]                           = None,
-		exists:       Nullable[Iterable[str]]                 = None,
-		when:         Nullable[When]                          = None,
-		allowFailure: Nullable[bool]                          = None,
-		variables:    Nullable[Mapping[str, str]]             = None,
+		condition:    Nullable[str]               = None,
+		changes:      Nullable[Iterable[str]]     = None,
+		compareTo:    Nullable[str]               = None,
+		exists:       Nullable[Iterable[str]]     = None,
+		when:         Nullable[RuleOutcome]       = None,
+		allowFailure: Nullable[bool]              = None,
+		variables:    Nullable[Mapping[str, str]] = None,
 		*,
 		parent:       Nullable[Union[Job, Workflow, Include]] = None
 	) -> None:
@@ -3137,7 +3125,7 @@ class Rule(Base[Union[Job, Workflow, Include]]):
 		:param parent:       Optional, reference to the job, workflow or include the rule belongs to. Default: ``None``.
 		:raises TypeError:   If parameter 'condition' or 'compareTo' is not of type :class:`str`.
 		:raises TypeError:   If an element of parameter 'changes' or 'exists' is not of type :class:`str`.
-		:raises TypeError:   If parameter 'when' is not of type :class:`When`.
+		:raises TypeError:   If parameter 'when' is not of type :class:`~pyTooling.CI.RuleOutcome`.
 		:raises TypeError:   If parameter 'allowFailure' is not of type :class:`bool`.
 		"""
 		super().__init__(line, parent=parent)
@@ -3163,8 +3151,8 @@ class Rule(Base[Union[Job, Workflow, Include]]):
 					ex.add_note(f"Got type '{getFullyQualifiedName(path)}'.")
 					raise ex
 
-		if when is not None and not isinstance(when, When):
-			ex = TypeError("Parameter 'when' is not of type 'When'.")
+		if when is not None and not isinstance(when, RuleOutcome):
+			ex = TypeError("Parameter 'when' is not of type 'RuleOutcome'.")
 			ex.add_note(f"Got type '{getFullyQualifiedName(when)}'.")
 			raise ex
 
@@ -3219,7 +3207,7 @@ class Rule(Base[Union[Job, Workflow, Include]]):
 		return self._exists
 
 	@readonly
-	def When(self) -> Nullable[When]:
+	def When(self) -> Nullable[RuleOutcome]:
 		"""
 		Read-only property to access when the job runs, if the rule matches (:attr:`_when`).
 
@@ -3312,11 +3300,11 @@ class Rule(Base[Union[Job, Workflow, Include]]):
 			when = None
 			if (whenValue := entry.get("when", None)) is not None:
 				try:
-					when = When.Parse(Base._ToText(whenValue))
+					when = RuleOutcome.Parse(Base._ToText(whenValue))
 				except ValueError as cause:
 					ex = PipelineFileError(f"Key 'when' of a rule of {owner} is not a known value.", path, entryLine)
 					ex.add_note(f"Got '{whenValue}'.")
-					ex.add_note(f"Allowed values: {', '.join(member.value for member in When)}.")
+					ex.add_note(f"Allowed values: {', '.join(member.value for member in RuleOutcome)}.")
 					raise ex from cause
 
 			allowFailure = Base._ToPython(entry.get("allow_failure", None))

@@ -39,9 +39,10 @@ from textwrap                      import dedent
 
 from pyTooling.GitLab.PipelineFile import DEFAULT_STAGES, Job, Need, NeedKind, PipelineFile, PipelineFileError
 from pyTooling.GitLab.PipelineFile import Default, Include, IncludeKind, Parallel, Rule, Trigger, TriggerStrategy
-from pyTooling.GitLab.PipelineFile import Input, InputType, Variable, When, Workflow
+from pyTooling.GitLab.PipelineFile import Input, InputType, Variable, Workflow
 from pyTooling.GitLab.PipelineFile import DefinedJob, DefinedMatrix, DefinedMatrixJob, DefinedPipeline
 from pyTooling.GitLab.PipelineFile import DefinedWorkflow, IncludeResolver
+from pyTooling.CI                  import RuleOutcome
 from pyTooling.Testing             import Testcase, testsuite, testcase
 
 
@@ -577,7 +578,7 @@ class Jobs(Fixture):
 
 		self.assertEqual("test", test.Stage)
 		self.assertEqual(("pytest", ), test.Script)
-		self.assertIs(When.Manual, test.When)
+		self.assertIs(RuleOutcome.Manual, test.When)
 		self.assertIs(True, test.AllowFailure)
 		self.assertEqual((137, 255), test.AllowedExitCodes)
 		self.assertIsNone(test.Image)
@@ -608,7 +609,7 @@ class Jobs(Fixture):
 		pipelineFile = PipelineFile(Path(".gitlab-ci.yml"))
 		variable = Variable("A", 4, "a")
 		job = Job(
-			"build", 3, "build", when=When.Always, allowFailure=False, allowedExitCodes=[1], script=["make"],
+			"build", 3, "build", when=RuleOutcome.Always, allowFailure=False, allowedExitCodes=[1], script=["make"],
 			variables=[variable], parent=pipelineFile
 		)
 		hidden = Job(".template", 7, parent=pipelineFile)
@@ -680,13 +681,13 @@ class JobParameters(Testcase):
 	@testcase("Scalars")
 	def Scalars(self) -> None:
 		"""
-		'when' is a When, 'allowFailure' a boolean, 'image' and 'environment' strings.
+		'when' is a RuleOutcome, 'allowFailure' a boolean, 'image' and 'environment' strings.
 
 		Checks each TypeError.
 		"""
 		with self.assertRaises(TypeError) as context:
 			Job("a", 1, when="manual")
-		self.assertEqual("Parameter 'when' is not of type 'When'.", str(context.exception))
+		self.assertEqual("Parameter 'when' is not of type 'RuleOutcome'.", str(context.exception))
 
 		with self.assertRaises(TypeError) as context:
 			Job("a", 1, allowFailure="yes")
@@ -780,7 +781,7 @@ class JobErrors(Fixture):
 		self.assertEqual("Key 'when' of job 'build' is not a known value.", str(context.exception))
 		self.assertEqual(2, context.exception.Line)
 		self.assertIn(
-			"Allowed values: on_success, on_failure, never, always, manual, delayed.", context.exception.__notes__
+			"Allowed values: on_success, on_failure, always, manual, delayed, never.", context.exception.__notes__
 		)
 
 	@testcase("Keys of the wrong kind")
@@ -1082,9 +1083,9 @@ class Rules(Fixture):
 		self.assertEqual(3, len(workflow.Rules))
 		self.assertEqual('$CI_PIPELINE_SOURCE == "merge_request_event"', workflow.Rules[0].Condition)
 		self.assertIsNone(workflow.Rules[0].When)
-		self.assertIs(When.Never, workflow.Rules[1].When)
+		self.assertIs(RuleOutcome.Never, workflow.Rules[1].When)
 		self.assertIsNone(workflow.Rules[2].Condition)
-		self.assertIs(When.Always, workflow.Rules[2].When)
+		self.assertIs(RuleOutcome.Always, workflow.Rules[2].When)
 		for rule in workflow.Rules:
 			self.assertIs(workflow, rule.Parent)
 			self.assertIs(pipelineFile, rule.PipelineFile)
@@ -1120,7 +1121,7 @@ class Rules(Fixture):
 		self.assertIsNone(second.Condition)
 		self.assertEqual(("src/**/*", ), second.Changes)
 		self.assertEqual("refs/heads/main", second.CompareTo)
-		self.assertIs(When.Manual, second.When)
+		self.assertIs(RuleOutcome.Manual, second.When)
 		self.assertIs(True, second.AllowFailure)
 
 		self.assertEqual(("Dockerfile", ), third.Exists)
@@ -1139,7 +1140,7 @@ class Rules(Fixture):
 		rule = Rule(4, "$A", parent=job)
 		self.assertEqual([rule], job.Rules)
 
-		passed = Rule(8, when=When.Always)
+		passed = Rule(8, when=RuleOutcome.Always)
 		workflow = Workflow(7, "Name", [passed])
 		pipelineFile = PipelineFile(Path(".gitlab-ci.yml"), workflow=workflow)
 		self.assertIs(workflow, passed.Parent)
@@ -1158,7 +1159,7 @@ class RuleParameters(Testcase):
 	@testcase("Rule")
 	def RuleChecks(self) -> None:
 		"""
-		A rule's texts are strings, its paths strings, 'when' a When, 'allowFailure' a boolean.
+		A rule's texts are strings, its paths strings, 'when' a RuleOutcome, 'allowFailure' a boolean.
 
 		Checks a TypeError of each kind of parameter.
 		"""
@@ -1172,7 +1173,7 @@ class RuleParameters(Testcase):
 
 		with self.assertRaises(TypeError) as context:
 			Rule(1, when="never")
-		self.assertEqual("Parameter 'when' is not of type 'When'.", str(context.exception))
+		self.assertEqual("Parameter 'when' is not of type 'RuleOutcome'.", str(context.exception))
 
 		with self.assertRaises(TypeError) as context:
 			Rule(1, allowFailure=1)
@@ -1544,7 +1545,7 @@ class Extends(Fixture):
 		self.assertEqual(2, len(jobs["job"].Rules))
 		self.assertEqual("$A", jobs["job"].Rules[0].Condition)
 		self.assertEqual(27, jobs["job"].Rules[0].Line)
-		self.assertIs(When.Never, jobs["job"].Rules[1].When)
+		self.assertIs(RuleOutcome.Never, jobs["job"].Rules[1].When)
 		self.assertEqual(("echo one", "echo two"), jobs["nested"].Script)
 
 	@testcase("Several jobs extended")
