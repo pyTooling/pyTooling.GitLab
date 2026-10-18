@@ -1,0 +1,56 @@
+# A configuration whose jobs need each other in every way 'needs' allows.
+stages:
+  - build
+  - test
+  - deploy
+
+linux:build:
+  stage: build
+  script: make
+
+mac:build:
+  stage: build
+  script: make
+
+lint:
+  needs: []
+  script: lint
+
+linux:rspec:
+  needs: ["linux:build"]
+  script: rspec
+
+mac:rspec:
+  needs:
+    - job: mac:build
+      artifacts: false
+  script: rspec
+
+optional:
+  needs:
+    - job: sometimes
+      optional: true
+  script: echo
+
+child:
+  needs:
+    - pipeline: $PARENT_PIPELINE_ID
+      job: generate
+  script: echo
+
+downstream:
+  needs:
+    - project: group/other
+      job: build
+      ref: main
+      artifacts: true
+  script: echo
+
+mirror:
+  needs:
+    pipeline: other/project
+  script: echo
+
+production:
+  stage: deploy
+  script: deploy

@@ -38,6 +38,7 @@ read once into objects:
    - :class:`PipelineFile` | a configuration file, e.g. :file:`.gitlab-ci.yml`
      - :class:`Variable`   | a default variable, declared in the top-level ``variables``
      - :class:`Job`        | a job or a hidden job, in file order
+       - :class:`Need`     | an entry of the job's ``needs``
        - :class:`Variable` | a variable of the job
 
 Every element knows its parent, the file it belongs to and the line it starts at, so a consumer can name the place a
@@ -142,6 +143,16 @@ class When(StringEnum):
 	Always =    "always"      #: Whatever the jobs of earlier stages did.
 	Manual =    "manual"      #: When started by hand.
 	Delayed =   "delayed"     #: After the time given by ``start_in``.
+
+
+@export
+class NeedKind(StringEnum):
+	"""What an entry of ``needs`` refers to."""
+
+	Job =            "job"              #: A job of the same pipeline.
+	PipelineJob =    "pipeline-job"     #: A job of another pipeline in the same parent-child hierarchy.
+	ProjectJob =     "project-job"      #: A job of another project's pipeline, whose artifacts are downloaded.
+	PipelineStatus = "pipeline-status"  #: The status of another project's pipeline, which the job mirrors.
 
 
 @export
@@ -528,6 +539,8 @@ class PipelineFile(Base[None]):
 		:raises PipelineFileError: If a key holds a value of the wrong kind.
 		:raises PipelineFileError: If a job is in a stage the pipeline doesn't have. |br|
 		                           The note lists the stages.
+		:raises PipelineFileError: If a job needs a job the file doesn't have, or the jobs need each other in a cycle. |br|
+		                           For an unknown job, the note lists the file's jobs.
 		"""
 		if path is None:
 			raise ValueError("Parameter 'path' is None.")
@@ -617,8 +630,13 @@ class PipelineFile(Base[None]):
 
 		:raises PipelineFileError: If a job is in a stage the pipeline doesn't have. |br|
 		                           The note lists the stages.
+		:raises PipelineFileError: If a job needs a job the file doesn't have. |br|
+		                           The note lists the file's jobs.
+		:raises PipelineFileError: If the jobs need each other in a cycle.
 		"""
 		self._ValidateStages()
+		self._ValidateNeeds()
+		self._ValidateAcyclic()
 
 	def _ValidateStages(self) -> None:
 		"""
@@ -636,20 +654,71 @@ class PipelineFile(Base[None]):
 				ex.add_note(f"Stages: {', '.join(stages)}.")
 				raise ex
 
+	def _ValidateNeeds(self) -> None:
+		"""
+		Validate that every job needs only jobs of the file, unless the need is optional or refers to another pipeline.
+
+		:raises PipelineFileError: If a job needs a job the file doesn't have. |br|
+		                           The note lists the file's jobs.
+		"""
+		for job in self._jobs.values():
+			if job._needs is None:
+				continue
+
+			for need in job._needs:
+				if need._kind is NeedKind.Job and not need._optional and need._job not in self._jobs:
+					ex = PipelineFileError(
+						f"Job '{job._name}' needs job '{need._job}', which the file doesn't have.", self._path, need._line
+					)
+					ex.add_note(f"Jobs: {', '.join(self._jobs)}.")
+					raise ex
+
+	def _ValidateAcyclic(self) -> None:
+		"""
+		Validate that the jobs don't need each other in a cycle.
+
+		:raises PipelineFileError: If the jobs need each other in a cycle.
+		"""
+		finished: set[str] = set()
+		stack:    list[str] = []
+
+		def visit(job: Job) -> None:
+			"""
+			Nested function for recursion.
+
+			:param job:                The job whose needs are followed.
+			:raises PipelineFileError: If the job is reached again while its needs are followed.
+			"""
+			if job._name in finished:
+				return
+			elif job._name in stack:
+				cycle = stack[stack.index(job._name):] + [job._name]
+				raise PipelineFileError(f"Jobs need each other in a cycle: {' -> '.join(cycle)}.", self._path, job._line)
+
+			stack.append(job._name)
+			for needed in job.NeededJobs:
+				visit(needed)
+			stack.pop()
+			finished.add(job._name)
+
+		for job in self._jobs.values():
+			visit(job)
+
 
 @export
 class Job(Base[PipelineFile]):
 	"""
 	A job of a configuration file, or a hidden job.
 
-	A job runs :attr:`Script` in :attr:`Stage`, after the jobs of the earlier stages. A hidden job, whose name starts
-	with a dot, isn't run; other jobs extend it.
+	A job runs :attr:`Script` in :attr:`Stage`, after the jobs of the earlier stages - or, with a ``needs`` key, after
+	the jobs in :attr:`Needs`. A hidden job, whose name starts with a dot, isn't run; other jobs extend it.
 	"""
 
 	_PARENT_TYPE: ClassVar[ParentTypes] = PipelineFile  #: A job is contained in a configuration file.
 
 	_name:             str                   #: Name of the job, the key it is declared under.
 	_stage:            str                   #: Stage the job runs in.
+	_needs:            Nullable[list[Need]]  #: Entries of the job's ``needs``, or ``None`` without a ``needs`` key.
 	_when:             Nullable[When]        #: When the job runs.
 	_allowFailure:     Nullable[bool]        #: ``True``, if the pipeline continues when the job fails.
 	_allowedExitCodes: tuple[int, ...]       #: Exit codes, with which the job may fail.
@@ -667,6 +736,7 @@ class Job(Base[PipelineFile]):
 		name:             str,
 		line:             int,
 		stage:            str                          = "test",
+		needs:            Nullable[Iterable[Need]]     = None,
 		when:             Nullable[When]               = None,
 		allowFailure:     Nullable[bool]               = None,
 		allowedExitCodes: Nullable[Iterable[int]]      = None,
@@ -684,11 +754,13 @@ class Job(Base[PipelineFile]):
 		"""
 		Initializes a job.
 
-		A variable is attached by passing it, or by constructing it with the job as parent.
+		A need or a variable is attached by passing it, or by constructing it with the job as parent.
 
 		:param name:             Name of the job, the key it is declared under.
 		:param line:             Line the job's name is written at, starting at 1.
 		:param stage:            Optional, stage the job runs in. Default: ``test``.
+		:param needs:            Optional, entries of the job's ``needs``, which are attached to the job; an empty
+		                         iterable for ``needs: []``. Default: ``None``, for a job without a ``needs`` key.
 		:param when:             Optional, when the job runs. Default: ``None``, for a job that doesn't say.
 		:param allowFailure:     Optional, ``True``, if the pipeline continues when the job fails. Default: ``None``.
 		:param allowedExitCodes: Optional, exit codes, with which the job may fail. Default: ``None``.
@@ -710,6 +782,7 @@ class Job(Base[PipelineFile]):
 		:raises TypeError:       If an element of parameter 'allowedExitCodes' is not of type :class:`int`.
 		:raises TypeError:       If an element of parameter 'script', 'beforeScript', 'afterScript', 'services' or
 		                         'tags' is not of type :class:`str`.
+		:raises TypeError:       If an element of parameter 'needs' is not of type :class:`Need`.
 		:raises TypeError:       If an element of parameter 'variables' is not of type :class:`Variable`.
 		"""
 		super().__init__(line, parent=parent)
@@ -773,11 +846,23 @@ class Job(Base[PipelineFile]):
 
 		self._name =         name
 		self._stage =        stage
+		self._needs =        None
 		self._when =         when
 		self._allowFailure = allowFailure
 		self._image =        image
 		self._environment =  environment
 		self._variables =    {}
+
+		if needs is not None:
+			self._needs = []
+			for need in needs:
+				if not isinstance(need, Need):
+					ex = TypeError("An element of parameter 'needs' is not of type 'Need'.")
+					ex.add_note(f"Got type '{getFullyQualifiedName(need)}'.")
+					raise ex
+
+				self._needs.append(need)
+				need.Parent = self
 
 		if variables is not None:
 			for variable in variables:
@@ -795,6 +880,9 @@ class Job(Base[PipelineFile]):
 	@Base.Parent.setter
 	def Parent(self, value: PipelineFile) -> None:
 		Base.Parent.fset(self, value)
+
+		for need in () if self._needs is None else self._needs:
+			need.Parent = self
 
 		for variable in self._variables.values():
 			variable.Parent = self
@@ -825,6 +913,31 @@ class Job(Base[PipelineFile]):
 		:returns: The stage, ``test`` for a job that doesn't name one.
 		"""
 		return self._stage
+
+	@readonly
+	def Needs(self) -> Nullable[tuple[Need, ...]]:
+		"""
+		Read-only property to return the entries of the job's ``needs`` (:attr:`_needs`).
+
+		:returns: The entries, in file order; an empty tuple for ``needs: []``; or ``None`` for a job without a ``needs``
+		          key, which runs after the jobs of the earlier stages.
+		"""
+		return None if self._needs is None else tuple(self._needs)
+
+	@readonly
+	def NeededJobs(self) -> tuple[Job, ...]:
+		"""
+		Read-only property to return the jobs of the same file this job needs, as its ``needs`` names them.
+
+		An optional need of a job the file doesn't have is skipped, as are needs of other pipelines.
+
+		:returns: The jobs, in the order the ``needs`` key lists them.
+		"""
+		if self._needs is None or self._pipelineFile is None:
+			return ()
+
+		jobs = self._pipelineFile._jobs
+		return tuple(jobs[need._job] for need in self._needs if need._kind is NeedKind.Job and need._job in jobs)
 
 	@readonly
 	def When(self) -> Nullable[When]:
@@ -985,7 +1098,12 @@ class Job(Base[PipelineFile]):
 		:raises PipelineFileError: If key ``when`` is not a value GitLab knows. |br|
 		                           The note lists the allowed values.
 		:raises PipelineFileError: If a key of the job holds a value of the wrong kind.
+		:raises PipelineFileError: If an entry of key ``needs`` is malformed.
 		"""
+		needs = None
+		if "needs" in mapping:
+			needs = Need._FromYAMLEntries(mapping["needs"], name, path, Base._KeyLine(mapping, "needs"))
+
 		when = None
 		if (whenValue := mapping.get("when", None)) is not None:
 			try:
@@ -1042,6 +1160,7 @@ class Job(Base[PipelineFile]):
 		return cls(
 			name, line,
 			stage="test" if stage is None else Base._ToText(stage),
+			needs=needs,
 			when=when,
 			allowFailure=allowFailure,
 			allowedExitCodes=exitCodes,
@@ -1285,3 +1404,290 @@ class Variable(Base[Union[PipelineFile, Job]]):
 			raise ex
 
 		return [cls._FromYAML(str(name), value, path, Base._KeyLine(mapping, name)) for name, value in mapping.items()]
+
+
+@export
+class Need(Base[Job]):
+	"""
+	An entry of a job's ``needs``.
+
+	An entry names a job of the same pipeline, as a string or as ``job`` of a mapping; a job of another pipeline of
+	the parent-child hierarchy, with ``pipeline`` and ``job``; a job of another project's pipeline, with ``project``,
+	``job`` and ``ref``; or, with ``pipeline`` only, another project's pipeline, whose status the job mirrors.
+	:attr:`Kind` says which.
+	"""
+
+	_PARENT_TYPE: ClassVar[ParentTypes] = Job  #: A need is an entry of a job's ``needs``.
+
+	_kind:      NeedKind       #: What the entry refers to.
+	_job:       Nullable[str]  #: Name of the needed job.
+	_artifacts: bool           #: ``True``, if the needed job's artifacts are downloaded.
+	_optional:  bool           #: ``True``, if the needed job may be missing in the pipeline.
+	_pipeline:  Nullable[str]  #: The other pipeline: its ID, or the project whose pipeline's status is mirrored.
+	_project:   Nullable[str]  #: Path of the other project.
+	_ref:       Nullable[str]  #: Reference of the other project, whose latest pipeline's artifacts are downloaded.
+
+	_KEYS: ClassVar[tuple[str, ...]] = (
+		"job", "artifacts", "optional", "pipeline", "project", "ref"
+	)  #: Keys of an entry as mapping.
+
+	def __init__(
+		self,
+		job:       Nullable[str],
+		line:      int,
+		kind:      NeedKind      = NeedKind.Job,
+		artifacts: bool          = True,
+		optional:  bool          = False,
+		pipeline:  Nullable[str] = None,
+		project:   Nullable[str] = None,
+		ref:       Nullable[str] = None,
+		*,
+		parent:    Nullable[Job] = None
+	) -> None:
+		"""
+		Initializes an entry of a job's ``needs``.
+
+		:param job:         Name of the needed job, or ``None`` for a need of kind :attr:`NeedKind.PipelineStatus`.
+		:param line:        Line the entry is written at, starting at 1.
+		:param kind:        Optional, what the entry refers to. Default: a job of the same pipeline.
+		:param artifacts:   Optional, ``True``, if the needed job's artifacts are downloaded. Default: ``True``.
+		:param optional:    Optional, ``True``, if the needed job may be missing in the pipeline. Default: ``False``.
+		:param pipeline:    Optional, the other pipeline: its ID, or the project whose pipeline's status is mirrored.
+		                    Default: ``None``.
+		:param project:     Optional, path of the other project. Default: ``None``.
+		:param ref:         Optional, reference of the other project. Default: ``None``.
+		:param parent:      Optional, reference to the job whose ``needs`` holds the entry. Default: ``None``.
+		:raises ValueError: If parameter 'kind' is ``None``.
+		:raises TypeError:  If parameter 'kind' is not of type :class:`NeedKind`.
+		:raises TypeError:  If parameter 'job', 'pipeline', 'project' or 'ref' is not of type :class:`str`.
+		:raises TypeError:  If parameter 'artifacts' or 'optional' is not of type :class:`bool`.
+		:raises ValueError: If parameter 'job' is ``None``, but the kind names a job.
+		:raises ValueError: If parameter 'pipeline' is ``None``, but the kind refers to another pipeline.
+		:raises ValueError: If parameter 'project' or 'ref' is ``None``, but the kind refers to another project's job.
+		"""
+		super().__init__(line, parent=parent)
+
+		if kind is None:
+			raise ValueError("Parameter 'kind' is None.")
+		elif not isinstance(kind, NeedKind):
+			ex = TypeError("Parameter 'kind' is not of type 'NeedKind'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(kind)}'.")
+			raise ex
+
+		for parameterName, text in (
+			("job",      job),
+			("pipeline", pipeline),
+			("project",  project),
+			("ref",      ref)
+		):
+			if text is not None and not isinstance(text, str):
+				ex = TypeError(f"Parameter '{parameterName}' is not of type 'str'.")
+				ex.add_note(f"Got type '{getFullyQualifiedName(text)}'.")
+				raise ex
+
+		for parameterName, flag in (
+			("artifacts", artifacts),
+			("optional",  optional)
+		):
+			if not isinstance(flag, bool):
+				ex = TypeError(f"Parameter '{parameterName}' is not of type 'bool'.")
+				ex.add_note(f"Got type '{getFullyQualifiedName(flag)}'.")
+				raise ex
+
+		for parameterName, text, kinds in (
+			("job",      job,      (NeedKind.Job, NeedKind.PipelineJob, NeedKind.ProjectJob)),
+			("pipeline", pipeline, (NeedKind.PipelineJob, NeedKind.PipelineStatus)),
+			("project",  project,  (NeedKind.ProjectJob, )),
+			("ref",      ref,      (NeedKind.ProjectJob, ))
+		):
+			if text is None and kind in kinds:
+				ex = ValueError(f"Parameter '{parameterName}' is None.")
+				ex.add_note(f"A need of kind '{kind.value}' needs it.")
+				raise ex
+
+		self._kind =      kind
+		self._job =       job
+		self._artifacts = artifacts
+		self._optional =  optional
+		self._pipeline =  pipeline
+		self._project =   project
+		self._ref =       ref
+
+		if parent is not None:
+			if parent._needs is None:
+				parent._needs = []
+
+			parent._needs.append(self)
+
+	@readonly
+	def Kind(self) -> NeedKind:
+		"""
+		Read-only property to access what the entry refers to (:attr:`_kind`).
+
+		:returns: The kind of the need.
+		"""
+		return self._kind
+
+	@readonly
+	def JobName(self) -> Nullable[str]:
+		"""
+		Read-only property to access the name of the needed job (:attr:`_job`).
+
+		:returns: Name of the job, or ``None`` for a need mirroring another pipeline's status.
+		"""
+		return self._job
+
+	@readonly
+	def NeededJob(self) -> Nullable[Job]:
+		"""
+		Read-only property to return the needed job of the same file.
+
+		:returns: The job, or ``None`` for a need of another pipeline, or of a job the file doesn't have.
+		"""
+		if self._kind is not NeedKind.Job or self._pipelineFile is None:
+			return None
+
+		return self._pipelineFile._jobs.get(self._job, None)
+
+	@readonly
+	def Artifacts(self) -> bool:
+		"""
+		Read-only property to access whether the needed job's artifacts are downloaded (:attr:`_artifacts`).
+
+		:returns: ``True``, if the artifacts are downloaded.
+		"""
+		return self._artifacts
+
+	@readonly
+	def IsOptional(self) -> bool:
+		"""
+		Read-only property to access whether the needed job may be missing in the pipeline (:attr:`_optional`).
+
+		:returns: ``True``, if the need is optional.
+		"""
+		return self._optional
+
+	@readonly
+	def Pipeline(self) -> Nullable[str]:
+		"""
+		Read-only property to access the other pipeline (:attr:`_pipeline`).
+
+		:returns: The pipeline's ID, as ``$PARENT_PIPELINE_ID``, or the project whose pipeline's status is mirrored, or
+		          ``None`` for a need of the same pipeline or of another project's job.
+		"""
+		return self._pipeline
+
+	@readonly
+	def Project(self) -> Nullable[str]:
+		"""
+		Read-only property to access the path of the other project (:attr:`_project`).
+
+		:returns: The project's path, or ``None`` for a need of a job of the same project.
+		"""
+		return self._project
+
+	@readonly
+	def Ref(self) -> Nullable[str]:
+		"""
+		Read-only property to access the reference of the other project (:attr:`_ref`).
+
+		:returns: The reference, or ``None`` for a need of a job of the same project.
+		"""
+		return self._ref
+
+	def __str__(self) -> str:
+		"""
+		Return the needed job's name, or the pipeline whose status is mirrored.
+
+		:returns: The job's name, prefixed by the project for another project's job.
+		"""
+		if self._kind is NeedKind.PipelineStatus:
+			return f"pipeline {self._pipeline}"
+		elif self._kind is NeedKind.ProjectJob:
+			return f"{self._project}: {self._job}"
+
+		return self._job
+
+	@classmethod
+	def _FromYAML(cls, entry: Any, jobName: str, path: Path, line: int) -> Self:
+		"""
+		Read an entry of a job's ``needs``: a job's name, or a mapping of the keys in :attr:`_KEYS`.
+
+		:param entry:              The entry.
+		:param jobName:            Name of the job, whose ``needs`` holds the entry, for a message.
+		:param path:               Path to the configuration file.
+		:param line:               Line the entry is written at, starting at 1.
+		:returns:                  The need.
+		:raises PipelineFileError: If the entry is neither a job's name nor a mapping.
+		:raises PipelineFileError: If the mapping has a key GitLab doesn't know for a need. |br|
+		                           The note lists the allowed keys.
+		:raises PipelineFileError: If key ``artifacts`` or ``optional`` is not a boolean.
+		:raises PipelineFileError: If the mapping lacks a key its kind needs: ``job``, or ``ref`` with ``project``.
+		"""
+		if isinstance(entry, CommentedSeq) or entry is None:
+			ex = PipelineFileError(f"Need of job '{jobName}' is neither a job's name nor a mapping.", path, line)
+			ex.add_note(f"Got type '{getFullyQualifiedName(entry)}'.")
+			raise ex
+		elif not isinstance(entry, CommentedMap):
+			return cls(Base._ToText(entry), line)
+
+		for key in entry:
+			if key not in cls._KEYS:
+				ex = PipelineFileError(f"Need of job '{jobName}' has unknown key '{key}'.", path, Base._KeyLine(entry, key))
+				ex.add_note(f"Allowed keys: {', '.join(cls._KEYS)}.")
+				raise ex
+
+		flags = {}
+		for key, default in (
+			("artifacts", True),
+			("optional",  False)
+		):
+			flags[key] = Base._ToPython(entry.get(key, default))
+			if not isinstance(flags[key], bool):
+				ex = PipelineFileError(
+					f"Key '{key}' of a need of job '{jobName}' is not a boolean.", path, Base._KeyLine(entry, key)
+				)
+				ex.add_note(f"Got '{flags[key]}'.")
+				raise ex
+
+		texts = {}
+		for key in ("job", "pipeline", "project", "ref"):
+			texts[key] = None if entry.get(key, None) is None else Base._ToText(entry[key])
+
+		if texts["project"] is not None:
+			kind = NeedKind.ProjectJob
+		elif texts["pipeline"] is not None:
+			kind = NeedKind.PipelineStatus if texts["job"] is None else NeedKind.PipelineJob
+		else:
+			kind = NeedKind.Job
+
+		if texts["job"] is None and kind is not NeedKind.PipelineStatus:
+			raise PipelineFileError(f"Need of job '{jobName}' has no 'job' key.", path, line)
+		elif texts["ref"] is None and kind is NeedKind.ProjectJob:
+			raise PipelineFileError(f"Need of job '{jobName}' with key 'project' has no 'ref' key.", path, line)
+
+		return cls(
+			texts["job"], line, kind, flags["artifacts"], flags["optional"], texts["pipeline"], texts["project"], texts["ref"]
+		)
+
+	@classmethod
+	def _FromYAMLEntries(cls, value: Any, jobName: str, path: Path, line: int) -> list[Self]:
+		"""
+		Read a job's ``needs``: a list of entries, or a single mapping, as ``pipeline: other/project``.
+
+		:param value:              The key's value.
+		:param jobName:            Name of the job, for a message.
+		:param path:               Path to the configuration file.
+		:param line:               Line the ``needs`` key is written at, starting at 1.
+		:returns:                  The needs, in file order.
+		:raises PipelineFileError: If the value is neither a list nor a mapping.
+		:raises PipelineFileError: If an entry is malformed.
+		"""
+		if isinstance(value, CommentedMap):
+			return [cls._FromYAML(value, jobName, path, line)]
+		elif not isinstance(value, CommentedSeq):
+			ex = PipelineFileError(f"Key 'needs' of job '{jobName}' is neither a list nor a mapping.", path, line)
+			ex.add_note(f"Got type '{getFullyQualifiedName(value)}'.")
+			raise ex
+
+		return [cls._FromYAML(entry, jobName, path, Base._ItemLine(value, index)) for index, entry in enumerate(value)]

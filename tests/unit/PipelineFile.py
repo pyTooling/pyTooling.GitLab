@@ -28,13 +28,14 @@
 # SPDX-License-Identifier: Apache-2.0                                                                                  #
 # ==================================================================================================================== #
 """
-Unit tests for :mod:`pyTooling.GitLab.PipelineFile`: the configuration file, its stages, variables and jobs.
+Unit tests for :mod:`pyTooling.GitLab.PipelineFile`: the configuration file, its stages, variables, jobs and needs.
 """
 from pathlib                       import Path
 from tempfile                      import TemporaryDirectory
 from textwrap                      import dedent
 
-from pyTooling.GitLab.PipelineFile import DEFAULT_STAGES, Job, PipelineFile, PipelineFileError, Variable, When
+from pyTooling.GitLab.PipelineFile import DEFAULT_STAGES, Job, Need, NeedKind, PipelineFile, PipelineFileError
+from pyTooling.GitLab.PipelineFile import Variable, When
 from pyTooling.Testing             import Testcase, testsuite, testcase
 
 
@@ -600,7 +601,10 @@ class Jobs(Fixture):
 		"""
 		pipelineFile = PipelineFile(Path(".gitlab-ci.yml"))
 		variable = Variable("A", 4, "a")
-		job = Job("build", 3, "build", When.Always, False, [1], ["make"], variables=[variable], parent=pipelineFile)
+		job = Job(
+			"build", 3, "build", when=When.Always, allowFailure=False, allowedExitCodes=[1], script=["make"],
+			variables=[variable], parent=pipelineFile
+		)
 		hidden = Job(".template", 7, parent=pipelineFile)
 
 		self.assertIs(job, pipelineFile.Jobs["build"])
@@ -801,3 +805,250 @@ class JobErrors(Fixture):
 		with self.assertRaises(PipelineFileError) as context:
 			PipelineFile.FromFile(self._Write("build:\n  variables: [A]\n"))
 		self.assertEqual("Key 'variables' of job 'build' is not a mapping.", str(context.exception))
+
+
+@testsuite("Needs")
+class Needs(Fixture):
+	"""Reading the 'needs' of jobs, and constructing needs."""
+
+	@testcase("Without and with an empty 'needs'")
+	def Empty(self) -> None:
+		"""
+		A job without 'needs' has None, one with 'needs: []' an empty tuple.
+
+		Checks jobs 'production' and 'lint'.
+		"""
+		jobs = PipelineFile.FromFile(DATA / "Needs.yml").Jobs
+
+		self.assertIsNone(jobs["production"].Needs)
+		self.assertEqual((), jobs["production"].NeededJobs)
+		self.assertEqual((), jobs["lint"].Needs)
+
+	@testcase("Jobs of the same pipeline")
+	def SamePipeline(self) -> None:
+		"""
+		A need names a job as a string, or as 'job' of a mapping with 'artifacts'.
+
+		Checks jobs 'linux:rspec' and 'mac:rspec'.
+		"""
+		jobs = PipelineFile.FromFile(DATA / "Needs.yml").Jobs
+
+		linux = jobs["linux:rspec"].Needs[0]
+		self.assertIs(NeedKind.Job, linux.Kind)
+		self.assertEqual("linux:build", linux.JobName)
+		self.assertIs(True, linux.Artifacts)
+		self.assertIs(False, linux.IsOptional)
+		self.assertIs(jobs["linux:build"], linux.NeededJob)
+		self.assertIs(jobs["linux:rspec"], linux.Parent)
+		self.assertEqual(20, linux.Line)
+		self.assertEqual("linux:build", str(linux))
+		self.assertEqual((jobs["linux:build"], ), jobs["linux:rspec"].NeededJobs)
+
+		mac = jobs["mac:rspec"].Needs[0]
+		self.assertEqual("mac:build", mac.JobName)
+		self.assertIs(False, mac.Artifacts)
+		self.assertEqual((jobs["mac:build"], ), jobs["mac:rspec"].NeededJobs)
+
+	@testcase("Optional need of a missing job")
+	def Optional(self) -> None:
+		"""
+		An optional need may name a job the file doesn't have; it resolves to no job.
+
+		Checks job 'optional'.
+		"""
+		job = PipelineFile.FromFile(DATA / "Needs.yml").Jobs["optional"]
+
+		need = job.Needs[0]
+		self.assertIs(True, need.IsOptional)
+		self.assertIsNone(need.NeededJob)
+		self.assertEqual((), job.NeededJobs)
+
+	@testcase("Other pipelines")
+	def OtherPipelines(self) -> None:
+		"""
+		A need of another pipeline's job, another project's job, or another pipeline's status.
+
+		Checks jobs 'child', 'downstream' and 'mirror'.
+		"""
+		jobs = PipelineFile.FromFile(DATA / "Needs.yml").Jobs
+
+		child = jobs["child"].Needs[0]
+		self.assertIs(NeedKind.PipelineJob, child.Kind)
+		self.assertEqual("generate", child.JobName)
+		self.assertEqual("$PARENT_PIPELINE_ID", child.Pipeline)
+		self.assertIsNone(child.NeededJob)
+
+		downstream = jobs["downstream"].Needs[0]
+		self.assertIs(NeedKind.ProjectJob, downstream.Kind)
+		self.assertEqual("group/other", downstream.Project)
+		self.assertEqual("main", downstream.Ref)
+		self.assertEqual("group/other: build", str(downstream))
+
+		mirror = jobs["mirror"].Needs[0]
+		self.assertIs(NeedKind.PipelineStatus, mirror.Kind)
+		self.assertIsNone(mirror.JobName)
+		self.assertEqual("other/project", mirror.Pipeline)
+		self.assertEqual("pipeline other/project", str(mirror))
+		self.assertEqual((), jobs["mirror"].NeededJobs)
+
+	@testcase("Constructed")
+	def Constructed(self) -> None:
+		"""
+		A need constructed with a job as parent is attached to it; a need passed to a job takes it as parent.
+
+		Constructs two jobs with needs.
+		"""
+		job = Job("test", 3)
+		need = Need("build", 4, parent=job)
+		self.assertEqual((need, ), job.Needs)
+		self.assertIs(job, need.Parent)
+
+		passed = Need("build", 9)
+		other = Job("other", 8, needs=[passed])
+		self.assertIs(other, passed.Parent)
+		self.assertEqual((passed, ), other.Needs)
+
+
+@testsuite("Parameter checks of needs")
+class NeedParameters(Testcase):
+	"""The need's constructor rejects parameters of the wrong type, or missing for its kind."""
+
+	@testcase("Kind")
+	def Kind(self) -> None:
+		"""
+		A need's kind is a NeedKind.
+
+		Checks the ValueError and the TypeError.
+		"""
+		with self.assertRaises(ValueError) as context:
+			Need("a", 1, None)
+		self.assertEqual("Parameter 'kind' is None.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Need("a", 1, "job")
+		self.assertEqual("Parameter 'kind' is not of type 'NeedKind'.", str(context.exception))
+
+	@testcase("Types")
+	def Types(self) -> None:
+		"""
+		The texts are strings, the flags booleans.
+
+		Checks a TypeError of each kind of parameter.
+		"""
+		with self.assertRaises(TypeError) as context:
+			Need(1, 1)
+		self.assertEqual("Parameter 'job' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Need("a", 1, NeedKind.ProjectJob, project="p", ref=1)
+		self.assertEqual("Parameter 'ref' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Need("a", 1, artifacts="yes")
+		self.assertEqual("Parameter 'artifacts' is not of type 'bool'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Need("a", 1, optional=1)
+		self.assertEqual("Parameter 'optional' is not of type 'bool'.", str(context.exception))
+
+	@testcase("Missing for the kind")
+	def MissingForKind(self) -> None:
+		"""
+		A kind needs its keys: a job, a pipeline, a project and a ref.
+
+		Checks message and note of each ValueError.
+		"""
+		with self.assertRaises(ValueError) as context:
+			Need(None, 1)
+		self.assertEqual("Parameter 'job' is None.", str(context.exception))
+		self.assertEqual(["A need of kind 'job' needs it."], context.exception.__notes__)
+
+		with self.assertRaises(ValueError) as context:
+			Need(None, 1, NeedKind.PipelineStatus)
+		self.assertEqual("Parameter 'pipeline' is None.", str(context.exception))
+
+		with self.assertRaises(ValueError) as context:
+			Need("a", 1, NeedKind.ProjectJob, ref="main")
+		self.assertEqual("Parameter 'project' is None.", str(context.exception))
+
+		with self.assertRaises(ValueError) as context:
+			Need("a", 1, NeedKind.ProjectJob, project="group/other")
+		self.assertEqual("Parameter 'ref' is None.", str(context.exception))
+
+	@testcase("Needs of a job")
+	def JobNeeds(self) -> None:
+		"""
+		A job's needs are of type Need.
+
+		Checks the TypeError.
+		"""
+		with self.assertRaises(TypeError) as context:
+			Job("a", 1, needs=["build"])
+		self.assertEqual("An element of parameter 'needs' is not of type 'Need'.", str(context.exception))
+
+
+@testsuite("Malformed needs")
+class NeedErrors(Fixture):
+	"""A malformed or unresolvable 'needs' raises PipelineFileError, naming file and line."""
+
+	@testcase("Unknown job")
+	def UnknownJob(self) -> None:
+		"""
+		A need names a job of the file, unless it is optional.
+
+		Checks message, line and note.
+		"""
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("build:\n  script: make\ntest:\n  needs: [biuld]\n"))
+		self.assertEqual("Job 'test' needs job 'biuld', which the file doesn't have.", str(context.exception))
+		self.assertEqual(4, context.exception.Line)
+		self.assertIn("Jobs: build, test.", context.exception.__notes__)
+
+	@testcase("Cycle")
+	def Cycle(self) -> None:
+		"""
+		Jobs don't need each other in a cycle.
+
+		Checks the message naming the cycle.
+		"""
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("a:\n  needs: [b]\nb:\n  needs: [c]\nc:\n  needs: [a]\n"))
+		self.assertEqual("Jobs need each other in a cycle: a -> b -> c -> a.", str(context.exception))
+		self.assertEqual(1, context.exception.Line)
+
+	@testcase("Malformed entries")
+	def MalformedEntries(self) -> None:
+		"""
+		'needs' is a list or a mapping; an entry a job's name or a mapping of known keys, with the keys its kind needs.
+
+		Checks message and line of each error.
+		"""
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("test:\n  needs: build\n"))
+		self.assertEqual("Key 'needs' of job 'test' is neither a list nor a mapping.", str(context.exception))
+		self.assertEqual(2, context.exception.Line)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("test:\n  needs:\n    - [build]\n"))
+		self.assertEqual("Need of job 'test' is neither a job's name nor a mapping.", str(context.exception))
+		self.assertEqual(3, context.exception.Line)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("test:\n  needs:\n    - job: build\n      when: always\n"))
+		self.assertEqual("Need of job 'test' has unknown key 'when'.", str(context.exception))
+		self.assertEqual(4, context.exception.Line)
+		self.assertIn("Allowed keys: job, artifacts, optional, pipeline, project, ref.", context.exception.__notes__)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("test:\n  needs:\n    - job: build\n      artifacts: some\n"))
+		self.assertEqual("Key 'artifacts' of a need of job 'test' is not a boolean.", str(context.exception))
+		self.assertEqual(4, context.exception.Line)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("test:\n  needs:\n    - artifacts: false\n"))
+		self.assertEqual("Need of job 'test' has no 'job' key.", str(context.exception))
+		self.assertEqual(3, context.exception.Line)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("test:\n  needs:\n    - project: group/other\n      job: build\n"))
+		self.assertEqual("Need of job 'test' with key 'project' has no 'ref' key.", str(context.exception))
