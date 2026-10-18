@@ -16,6 +16,7 @@ Version 0.x (2026)
 
    * First release: pyTooling.GitLab, a sub-namespace of :doc:`pyTooling <pyTool:index>`, to work with GitLab CI/CD
      pipelines.
+   * The base exception :exc:`~pyTooling.GitLab.GitLabError`, from which every exception of the package derives.
    * 🚧 Data models: :ref:`pipeline runs <DATA/PipelineRun>` read from the GitLab REST API, and :ref:`pipeline files
      <DATA/PipelineFile>` (:file:`.gitlab-ci.yml`).
    * 🚧 The Sphinx domain :ref:`glci <GLCI>` documents a pipeline file's inputs and variables from the file itself.
