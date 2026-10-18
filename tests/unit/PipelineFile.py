@@ -28,14 +28,15 @@
 # SPDX-License-Identifier: Apache-2.0                                                                                  #
 # ==================================================================================================================== #
 """
-Unit tests for :mod:`pyTooling.GitLab.PipelineFile`: the configuration file, its stages, variables, jobs and needs.
+Unit tests for :mod:`pyTooling.GitLab.PipelineFile`: the configuration file, its stages, variables,
+jobs, needs, rules and workflow.
 """
 from pathlib                       import Path
 from tempfile                      import TemporaryDirectory
 from textwrap                      import dedent
 
 from pyTooling.GitLab.PipelineFile import DEFAULT_STAGES, Job, Need, NeedKind, PipelineFile, PipelineFileError
-from pyTooling.GitLab.PipelineFile import Variable, When
+from pyTooling.GitLab.PipelineFile import Rule, Variable, When, Workflow
 from pyTooling.Testing             import Testcase, testsuite, testcase
 
 
@@ -1052,3 +1053,203 @@ class NeedErrors(Fixture):
 		with self.assertRaises(PipelineFileError) as context:
 			PipelineFile.FromFile(self._Write("test:\n  needs:\n    - project: group/other\n      job: build\n"))
 		self.assertEqual("Need of job 'test' with key 'project' has no 'ref' key.", str(context.exception))
+
+
+@testsuite("Rules and workflow")
+class Rules(Fixture):
+	"""Reading the 'workflow' key and the 'rules' of jobs, and constructing rules."""
+
+	@testcase("Workflow")
+	def WorkflowKey(self) -> None:
+		"""
+		The workflow has the pipeline's name and its rules.
+
+		Checks the workflow and its rules.
+		"""
+		pipelineFile = PipelineFile.FromFile(DATA / "Rules.yml")
+		workflow = pipelineFile.Workflow
+
+		self.assertIs(pipelineFile, workflow.Parent)
+		self.assertEqual("Pipeline for $CI_COMMIT_REF_NAME", workflow.Name)
+		self.assertEqual(2, workflow.Line)
+		self.assertEqual(3, len(workflow.Rules))
+		self.assertEqual('$CI_PIPELINE_SOURCE == "merge_request_event"', workflow.Rules[0].Condition)
+		self.assertIsNone(workflow.Rules[0].When)
+		self.assertIs(When.Never, workflow.Rules[1].When)
+		self.assertIsNone(workflow.Rules[2].Condition)
+		self.assertIs(When.Always, workflow.Rules[2].When)
+		for rule in workflow.Rules:
+			self.assertIs(workflow, rule.Parent)
+			self.assertIs(pipelineFile, rule.PipelineFile)
+
+	@testcase("Without workflow")
+	def WithoutWorkflow(self) -> None:
+		"""
+		A file without 'workflow' has none, a job without 'rules' no rules.
+
+		Checks fixture 'Jobs.yml'.
+		"""
+		pipelineFile = PipelineFile.FromFile(DATA / "Jobs.yml")
+
+		self.assertIsNone(pipelineFile.Workflow)
+		self.assertEqual([], pipelineFile.Jobs["build"].Rules)
+
+	@testcase("Rules of a job")
+	def JobRules(self) -> None:
+		"""
+		'if' with 'changes'; 'changes' as mapping with 'compare_to', 'when' and 'allow_failure'; 'exists' with variables.
+
+		Checks the three rules of job 'docs'.
+		"""
+		docs = PipelineFile.FromFile(DATA / "Rules.yml").Jobs["docs"]
+		first, second, third = docs.Rules
+
+		self.assertEqual('$CI_COMMIT_BRANCH == "main"', first.Condition)
+		self.assertEqual(("doc/**/*", "README.md"), first.Changes)
+		self.assertIsNone(first.CompareTo)
+		self.assertEqual(13, first.Line)
+		self.assertIs(docs, first.Parent)
+
+		self.assertIsNone(second.Condition)
+		self.assertEqual(("src/**/*", ), second.Changes)
+		self.assertEqual("refs/heads/main", second.CompareTo)
+		self.assertIs(When.Manual, second.When)
+		self.assertIs(True, second.AllowFailure)
+
+		self.assertEqual(("Dockerfile", ), third.Exists)
+		self.assertEqual((), third.Changes)
+		self.assertEqual({"IMAGE": "docker", "RETRIES": "3"}, third.Variables)
+		self.assertIsNone(third.AllowFailure)
+
+	@testcase("Constructed")
+	def Constructed(self) -> None:
+		"""
+		A rule constructed with a job or workflow as parent is attached to it; one passed to them takes them as parent.
+
+		Constructs a job and a workflow with rules.
+		"""
+		job = Job("build", 3)
+		rule = Rule(4, "$A", parent=job)
+		self.assertEqual([rule], job.Rules)
+
+		passed = Rule(8, when=When.Always)
+		workflow = Workflow(7, "Name", [passed])
+		pipelineFile = PipelineFile(Path(".gitlab-ci.yml"), workflow=workflow)
+		self.assertIs(workflow, passed.Parent)
+		self.assertIs(pipelineFile, passed.PipelineFile)
+		self.assertIs(workflow, pipelineFile.Workflow)
+
+		other = PipelineFile(Path("other.yml"))
+		attached = Workflow(2, parent=other)
+		self.assertIs(attached, other.Workflow)
+
+
+@testsuite("Parameter checks of rules and workflow")
+class RuleParameters(Testcase):
+	"""The constructors of rules and workflows reject parameters of the wrong type."""
+
+	@testcase("Rule")
+	def RuleChecks(self) -> None:
+		"""
+		A rule's texts are strings, its paths strings, 'when' a When, 'allowFailure' a boolean.
+
+		Checks a TypeError of each kind of parameter.
+		"""
+		with self.assertRaises(TypeError) as context:
+			Rule(1, condition=1)
+		self.assertEqual("Parameter 'condition' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Rule(1, exists=["a", 1])
+		self.assertEqual("An element of parameter 'exists' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Rule(1, when="never")
+		self.assertEqual("Parameter 'when' is not of type 'When'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Rule(1, allowFailure=1)
+		self.assertEqual("Parameter 'allowFailure' is not of type 'bool'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Rule(1, parent=PipelineFile(Path(".gitlab-ci.yml")))
+		self.assertEqual("Parameter 'parent' is not of type 'Job' or 'Workflow'.", str(context.exception))
+
+	@testcase("Workflow")
+	def WorkflowChecks(self) -> None:
+		"""
+		A workflow's name is a string, its rules Rules; a file's workflow a Workflow; a job's rules Rules.
+
+		Checks each TypeError.
+		"""
+		with self.assertRaises(TypeError) as context:
+			Workflow(1, 1)
+		self.assertEqual("Parameter 'name' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Workflow(1, rules=["$A"])
+		self.assertEqual("An element of parameter 'rules' is not of type 'Rule'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			PipelineFile(Path(".gitlab-ci.yml"), workflow="workflow")
+		self.assertEqual("Parameter 'workflow' is not of type 'Workflow'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Job("a", 1, rules=["$A"])
+		self.assertEqual("An element of parameter 'rules' is not of type 'Rule'.", str(context.exception))
+
+
+@testsuite("Malformed rules and workflow")
+class RuleErrors(Fixture):
+	"""A malformed 'workflow' or 'rules' raises PipelineFileError, naming file and line."""
+
+	@testcase("Workflow not a mapping")
+	def WorkflowNotAMapping(self) -> None:
+		"""
+		Key 'workflow' is a mapping.
+
+		Checks message and line.
+		"""
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("variables: {}\nworkflow: [a]\n"))
+		self.assertEqual("Key 'workflow' is not a mapping.", str(context.exception))
+		self.assertEqual(2, context.exception.Line)
+
+	@testcase("Malformed rules")
+	def MalformedRules(self) -> None:
+		"""
+		'rules' is a list of mappings, whose keys hold values of the right kind.
+
+		Checks message and line of each error.
+		"""
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("build:\n  rules: always\n"))
+		self.assertEqual("Key 'rules' of job 'build' is not a list.", str(context.exception))
+		self.assertEqual(2, context.exception.Line)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("workflow:\n  rules:\n    - always\n"))
+		self.assertEqual("Rule of the workflow is not a mapping.", str(context.exception))
+		self.assertEqual(3, context.exception.Line)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("build:\n  rules:\n    - changes: README.md\n"))
+		self.assertEqual("Key 'changes' of a rule of job 'build' is not a list of paths.", str(context.exception))
+		self.assertEqual(3, context.exception.Line)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("build:\n  rules:\n    - exists:\n        project: a\n"))
+		self.assertEqual("Key 'exists' of a rule of job 'build' is not a list of paths.", str(context.exception))
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("build:\n  rules:\n    - when: sometimes\n"))
+		self.assertEqual("Key 'when' of a rule of job 'build' is not a known value.", str(context.exception))
+		self.assertEqual(3, context.exception.Line)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("build:\n  rules:\n    - allow_failure: often\n"))
+		self.assertEqual("Key 'allow_failure' of a rule of job 'build' is not a boolean.", str(context.exception))
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("build:\n  rules:\n    - variables: [A]\n"))
+		self.assertEqual("Key 'variables' of a rule of job 'build' is not a mapping.", str(context.exception))

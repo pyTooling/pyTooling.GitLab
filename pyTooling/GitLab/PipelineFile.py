@@ -36,9 +36,12 @@ read once into objects:
 .. tree::
 
    - :class:`PipelineFile` | a configuration file, e.g. :file:`.gitlab-ci.yml`
+     - :class:`Workflow`   | the ``workflow`` key
+       - :class:`Rule`     | a rule deciding whether a pipeline is created
      - :class:`Variable`   | a default variable, declared in the top-level ``variables``
      - :class:`Job`        | a job or a hidden job, in file order
        - :class:`Need`     | an entry of the job's ``needs``
+       - :class:`Rule`     | a rule deciding whether the job is added to a pipeline
        - :class:`Variable` | a variable of the job
 
 Every element knows its parent, the file it belongs to and the line it starts at, so a consumer can name the place a
@@ -344,30 +347,34 @@ class PipelineFile(Base[None]):
 	_variables:  dict[str, Variable]        #: Default variables, by name, in file order.
 	_jobs:       dict[str, Job]             #: Jobs, by name, in file order.
 	_hiddenJobs: dict[str, Job]             #: Hidden jobs, by name, in file order.
+	_workflow:   Nullable[Workflow]         #: The ``workflow`` key.
 
 	def __init__(
 		self,
 		path:      Path,
 		stages:    Nullable[Iterable[str]]      = None,
 		variables: Nullable[Iterable[Variable]] = None,
-		jobs:      Nullable[Iterable[Job]]      = None
+		jobs:      Nullable[Iterable[Job]]      = None,
+		workflow:  Nullable[Workflow]           = None
 	) -> None:
 		"""
 		Initializes a configuration file.
 
-		A variable or job is attached by passing it, or by constructing it with the configuration file as parent. Use
-		:meth:`FromFile` to read a configuration file.
+		A variable, job or workflow is attached by passing it, or by constructing it with the configuration file as
+		parent. Use :meth:`FromFile` to read a configuration file.
 
 		:param path:        Path to the configuration file.
 		:param stages:      Optional, stages as the ``stages`` key declares them. Default: ``None``, for a file without a
 		                    ``stages`` key.
 		:param variables:   Optional, default variables, which are attached to the file. Default: ``None``.
 		:param jobs:        Optional, jobs and hidden jobs, which are attached to the file. Default: ``None``.
+		:param workflow:    Optional, the ``workflow`` key, which is attached to the file. Default: ``None``.
 		:raises ValueError: If parameter 'path' is ``None``.
 		:raises TypeError:  If parameter 'path' is not of type :class:`~pathlib.Path`.
 		:raises TypeError:  If an element of parameter 'stages' is not of type :class:`str`.
 		:raises TypeError:  If an element of parameter 'variables' is not of type :class:`Variable`.
 		:raises TypeError:  If an element of parameter 'jobs' is not of type :class:`Job`.
+		:raises TypeError:  If parameter 'workflow' is not of type :class:`Workflow`.
 		"""
 		super().__init__(1)
 
@@ -384,6 +391,7 @@ class PipelineFile(Base[None]):
 		self._variables =    {}
 		self._jobs =         {}
 		self._hiddenJobs =   {}
+		self._workflow =     None
 
 		if stages is not None:
 			self._stages = tuple(stages)
@@ -412,6 +420,15 @@ class PipelineFile(Base[None]):
 
 				(self._hiddenJobs if job.IsHidden else self._jobs)[job._name] = job
 				job.Parent = self
+
+		if workflow is not None:
+			if not isinstance(workflow, Workflow):
+				ex = TypeError("Parameter 'workflow' is not of type 'Workflow'.")
+				ex.add_note(f"Got type '{getFullyQualifiedName(workflow)}'.")
+				raise ex
+
+			self._workflow = workflow
+			workflow.Parent = self
 
 	@Base.Parent.setter
 	def Parent(self, value: None) -> None:
@@ -476,6 +493,15 @@ class PipelineFile(Base[None]):
 		:returns: The hidden jobs, by name, in file order.
 		"""
 		return self._hiddenJobs
+
+	@readonly
+	def Workflow(self) -> Nullable[Workflow]:
+		"""
+		Read-only property to access the ``workflow`` key (:attr:`_workflow`).
+
+		:returns: The workflow, or ``None`` if the file has no ``workflow`` key.
+		"""
+		return self._workflow
 
 	@readonly
 	def JobCount(self) -> int:
@@ -590,10 +616,10 @@ class PipelineFile(Base[None]):
 
 		:param document:           The configuration, a mapping.
 		:param path:               Path to the configuration file.
-		:returns:                  The configuration file, with its variables and jobs attached.
+		:returns:                  The configuration file, with its variables, jobs and workflow attached.
 		:raises PipelineFileError: If key ``stages`` is not a list.
-		:raises PipelineFileError: If key ``variables`` or a job is not a mapping.
-		:raises PipelineFileError: If a key of a variable or a job holds a value of the wrong kind.
+		:raises PipelineFileError: If key ``variables``, ``workflow`` or a job is not a mapping.
+		:raises PipelineFileError: If a key of a variable, a job or the workflow holds a value of the wrong kind.
 		"""
 		stages = None
 		if (stageList := document.get("stages", None)) is not None:
@@ -622,7 +648,11 @@ class PipelineFile(Base[None]):
 
 			jobs.append(Job._FromYAML(name, job, path, line))
 
-		return cls(path, stages, variables, jobs)
+		workflow = None
+		if "workflow" in document:
+			workflow = Workflow._FromYAML(document["workflow"], path, Base._KeyLine(document, "workflow"))
+
+		return cls(path, stages, variables, jobs, workflow)
 
 	def _Validate(self) -> None:
 		"""
@@ -719,6 +749,7 @@ class Job(Base[PipelineFile]):
 	_name:             str                   #: Name of the job, the key it is declared under.
 	_stage:            str                   #: Stage the job runs in.
 	_needs:            Nullable[list[Need]]  #: Entries of the job's ``needs``, or ``None`` without a ``needs`` key.
+	_rules:            list[Rule]            #: Rules deciding whether the job is added to a pipeline.
 	_when:             Nullable[When]        #: When the job runs.
 	_allowFailure:     Nullable[bool]        #: ``True``, if the pipeline continues when the job fails.
 	_allowedExitCodes: tuple[int, ...]       #: Exit codes, with which the job may fail.
@@ -748,13 +779,14 @@ class Job(Base[PipelineFile]):
 		tags:             Nullable[Iterable[str]]      = None,
 		environment:      Nullable[str]                = None,
 		variables:        Nullable[Iterable[Variable]] = None,
+		rules:            Nullable[Iterable[Rule]]     = None,
 		*,
 		parent:           Nullable[PipelineFile]       = None
 	) -> None:
 		"""
 		Initializes a job.
 
-		A need or a variable is attached by passing it, or by constructing it with the job as parent.
+		A need, a variable or a rule is attached by passing it, or by constructing it with the job as parent.
 
 		:param name:             Name of the job, the key it is declared under.
 		:param line:             Line the job's name is written at, starting at 1.
@@ -772,6 +804,8 @@ class Job(Base[PipelineFile]):
 		:param tags:             Optional, tags selecting the runner. Default: ``None``.
 		:param environment:      Optional, name of the environment the job deploys to. Default: ``None``.
 		:param variables:        Optional, variables of the job, which are attached to the job. Default: ``None``.
+		:param rules:            Optional, rules deciding whether the job is added to a pipeline, which are attached to
+		                         the job. Default: ``None``.
 		:param parent:           Optional, reference to the configuration file containing the job. Default: ``None``.
 		:raises ValueError:      If parameter 'name' or 'stage' is ``None``.
 		:raises TypeError:       If parameter 'name' or 'stage' is not of type :class:`str`.
@@ -784,6 +818,7 @@ class Job(Base[PipelineFile]):
 		                         'tags' is not of type :class:`str`.
 		:raises TypeError:       If an element of parameter 'needs' is not of type :class:`Need`.
 		:raises TypeError:       If an element of parameter 'variables' is not of type :class:`Variable`.
+		:raises TypeError:       If an element of parameter 'rules' is not of type :class:`Rule`.
 		"""
 		super().__init__(line, parent=parent)
 
@@ -847,6 +882,7 @@ class Job(Base[PipelineFile]):
 		self._name =         name
 		self._stage =        stage
 		self._needs =        None
+		self._rules =        []
 		self._when =         when
 		self._allowFailure = allowFailure
 		self._image =        image
@@ -874,6 +910,16 @@ class Job(Base[PipelineFile]):
 				self._variables[variable._name] = variable
 				variable.Parent = self
 
+		if rules is not None:
+			for rule in rules:
+				if not isinstance(rule, Rule):
+					ex = TypeError("An element of parameter 'rules' is not of type 'Rule'.")
+					ex.add_note(f"Got type '{getFullyQualifiedName(rule)}'.")
+					raise ex
+
+				self._rules.append(rule)
+				rule.Parent = self
+
 		if parent is not None:
 			(parent._hiddenJobs if self.IsHidden else parent._jobs)[name] = self
 
@@ -886,6 +932,9 @@ class Job(Base[PipelineFile]):
 
 		for variable in self._variables.values():
 			variable.Parent = self
+
+		for rule in self._rules:
+			rule.Parent = self
 
 	@readonly
 	def Name(self) -> str:
@@ -938,6 +987,15 @@ class Job(Base[PipelineFile]):
 
 		jobs = self._pipelineFile._jobs
 		return tuple(jobs[need._job] for need in self._needs if need._kind is NeedKind.Job and need._job in jobs)
+
+	@readonly
+	def Rules(self) -> list[Rule]:
+		"""
+		Read-only property to access the rules deciding whether the job is added to a pipeline (:attr:`_rules`).
+
+		:returns: The rules, in the order GitLab evaluates them.
+		"""
+		return self._rules
 
 	@readonly
 	def When(self) -> Nullable[When]:
@@ -1155,6 +1213,10 @@ class Job(Base[PipelineFile]):
 			keyLine = Base._KeyLine(mapping, "variables")
 			variables = Variable._FromYAMLMapping(mapping["variables"], f"job '{name}'", path, keyLine)
 
+		rules = None
+		if "rules" in mapping:
+			rules = Rule._FromYAMLEntries(mapping["rules"], f"job '{name}'", path, Base._KeyLine(mapping, "rules"))
+
 		stage = mapping.get("stage", None)
 
 		return cls(
@@ -1171,7 +1233,8 @@ class Job(Base[PipelineFile]):
 			services=services,
 			tags=tags,
 			environment=cls._Name(mapping.get("environment", None)),
-			variables=variables
+			variables=variables,
+			rules=rules
 		)
 
 
@@ -1691,3 +1754,359 @@ class Need(Base[Job]):
 			raise ex
 
 		return [cls._FromYAML(entry, jobName, path, Base._ItemLine(value, index)) for index, entry in enumerate(value)]
+
+
+@export
+class Workflow(Base[PipelineFile]):
+	"""The ``workflow`` key of a configuration file: the pipeline's name and the rules deciding whether it is created."""
+
+	_PARENT_TYPE: ClassVar[ParentTypes] = PipelineFile  #: A workflow belongs to a configuration file.
+
+	_name:  Nullable[str]  #: Name of the pipeline.
+	_rules: list[Rule]     #: Rules deciding whether a pipeline is created.
+
+	def __init__(
+		self,
+		line:   int,
+		name:   Nullable[str]            = None,
+		rules:  Nullable[Iterable[Rule]] = None,
+		*,
+		parent: Nullable[PipelineFile]   = None
+	) -> None:
+		"""
+		Initializes the ``workflow`` key.
+
+		:param line:       Line the ``workflow`` key is written at, starting at 1.
+		:param name:       Optional, name of the pipeline. Default: ``None``.
+		:param rules:      Optional, rules deciding whether a pipeline is created, which are attached to the workflow.
+		                   Default: ``None``.
+		:param parent:     Optional, reference to the configuration file. Default: ``None``.
+		:raises TypeError: If parameter 'name' is not of type :class:`str`.
+		:raises TypeError: If an element of parameter 'rules' is not of type :class:`Rule`.
+		"""
+		super().__init__(line, parent=parent)
+
+		if name is not None and not isinstance(name, str):
+			ex = TypeError("Parameter 'name' is not of type 'str'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(name)}'.")
+			raise ex
+
+		self._name =  name
+		self._rules = []
+
+		if rules is not None:
+			for rule in rules:
+				if not isinstance(rule, Rule):
+					ex = TypeError("An element of parameter 'rules' is not of type 'Rule'.")
+					ex.add_note(f"Got type '{getFullyQualifiedName(rule)}'.")
+					raise ex
+
+				self._rules.append(rule)
+				rule.Parent = self
+
+		if parent is not None:
+			parent._workflow = self
+
+	@Base.Parent.setter
+	def Parent(self, value: PipelineFile) -> None:
+		Base.Parent.fset(self, value)
+
+		for rule in self._rules:
+			rule.Parent = self
+
+	@readonly
+	def Name(self) -> Nullable[str]:
+		"""
+		Read-only property to access the pipeline's name (:attr:`_name`).
+
+		:returns: The ``name`` key, as written, or ``None`` if the workflow gives none.
+		"""
+		return self._name
+
+	@readonly
+	def Rules(self) -> list[Rule]:
+		"""
+		Read-only property to access the rules deciding whether a pipeline is created (:attr:`_rules`).
+
+		:returns: The rules, in the order GitLab evaluates them.
+		"""
+		return self._rules
+
+	@classmethod
+	def _FromYAML(cls, mapping: Any, path: Path, line: int) -> Self:
+		"""
+		Read the ``workflow`` key.
+
+		:param mapping:            The key's value.
+		:param path:               Path to the configuration file.
+		:param line:               Line the ``workflow`` key is written at, starting at 1.
+		:returns:                  The workflow.
+		:raises PipelineFileError: If the value is not a mapping.
+		:raises PipelineFileError: If a rule is malformed.
+		"""
+		if not isinstance(mapping, CommentedMap):
+			ex = PipelineFileError("Key 'workflow' is not a mapping.", path, line)
+			ex.add_note(f"Got type '{getFullyQualifiedName(mapping)}'.")
+			raise ex
+
+		rules = None
+		if "rules" in mapping:
+			rules = Rule._FromYAMLEntries(mapping["rules"], "the workflow", path, Base._KeyLine(mapping, "rules"))
+
+		name = mapping.get("name", None)
+		return cls(line, None if name is None else Base._ToText(name), rules)
+
+
+@export
+class Rule(Base[Union[Job, Workflow]]):
+	"""
+	A rule of ``rules``, deciding whether a job is added to a pipeline, or a pipeline is created.
+
+	GitLab evaluates the rules in order; the first one matching decides. A rule matches if its :attr:`Condition`, its
+	:attr:`Changes` and its :attr:`Exists` match, as far as it has them.
+	"""
+
+	_PARENT_TYPE: ClassVar[ParentTypes] = (Job, Workflow)  #: A rule belongs to a job or a workflow.
+
+	_condition:    Nullable[str]    #: Expression of the rule's ``if``.
+	_changes:      tuple[str, ...]  #: Paths of the rule's ``changes``.
+	_compareTo:    Nullable[str]    #: Reference ``changes`` is compared to.
+	_exists:       tuple[str, ...]  #: Paths of the rule's ``exists``.
+	_when:         Nullable[When]   #: When the job runs, if the rule matches.
+	_allowFailure: Nullable[bool]   #: ``True``, if the pipeline continues when the job fails, if the rule matches.
+	_variables:    dict[str, str]   #: Variables set, if the rule matches, by name.
+
+	def __init__(
+		self,
+		line:         int,
+		condition:    Nullable[str]                 = None,
+		changes:      Nullable[Iterable[str]]       = None,
+		compareTo:    Nullable[str]                 = None,
+		exists:       Nullable[Iterable[str]]       = None,
+		when:         Nullable[When]                = None,
+		allowFailure: Nullable[bool]                = None,
+		variables:    Nullable[Mapping[str, str]]   = None,
+		*,
+		parent:       Nullable[Union[Job, Workflow]] = None
+	) -> None:
+		"""
+		Initializes a rule.
+
+		:param line:         Line the rule is written at, starting at 1.
+		:param condition:    Optional, expression of the rule's ``if``. Default: ``None``.
+		:param changes:      Optional, paths of the rule's ``changes``. Default: ``None``.
+		:param compareTo:    Optional, reference ``changes`` is compared to. Default: ``None``.
+		:param exists:       Optional, paths of the rule's ``exists``. Default: ``None``.
+		:param when:         Optional, when the job runs, if the rule matches. Default: ``None``.
+		:param allowFailure: Optional, ``True``, if the pipeline continues when the job fails. Default: ``None``.
+		:param variables:    Optional, variables set, if the rule matches, by name. Default: ``None``.
+		:param parent:       Optional, reference to the job or workflow the rule belongs to. Default: ``None``.
+		:raises TypeError:   If parameter 'condition' or 'compareTo' is not of type :class:`str`.
+		:raises TypeError:   If an element of parameter 'changes' or 'exists' is not of type :class:`str`.
+		:raises TypeError:   If parameter 'when' is not of type :class:`When`.
+		:raises TypeError:   If parameter 'allowFailure' is not of type :class:`bool`.
+		"""
+		super().__init__(line, parent=parent)
+
+		for parameterName, text in (
+			("condition", condition),
+			("compareTo", compareTo)
+		):
+			if text is not None and not isinstance(text, str):
+				ex = TypeError(f"Parameter '{parameterName}' is not of type 'str'.")
+				ex.add_note(f"Got type '{getFullyQualifiedName(text)}'.")
+				raise ex
+
+		self._changes = () if changes is None else tuple(changes)
+		self._exists =  () if exists is None else tuple(exists)
+		for parameterName, paths in (
+			("changes", self._changes),
+			("exists",  self._exists)
+		):
+			for path in paths:
+				if not isinstance(path, str):
+					ex = TypeError(f"An element of parameter '{parameterName}' is not of type 'str'.")
+					ex.add_note(f"Got type '{getFullyQualifiedName(path)}'.")
+					raise ex
+
+		if when is not None and not isinstance(when, When):
+			ex = TypeError("Parameter 'when' is not of type 'When'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(when)}'.")
+			raise ex
+
+		if allowFailure is not None and not isinstance(allowFailure, bool):
+			ex = TypeError("Parameter 'allowFailure' is not of type 'bool'.")
+			ex.add_note(f"Got type '{getFullyQualifiedName(allowFailure)}'.")
+			raise ex
+
+		self._condition =    condition
+		self._compareTo =    compareTo
+		self._when =         when
+		self._allowFailure = allowFailure
+		self._variables =    {} if variables is None else dict(variables)
+
+		if parent is not None:
+			parent._rules.append(self)
+
+	@readonly
+	def Condition(self) -> Nullable[str]:
+		"""
+		Read-only property to access the expression of the rule's ``if`` (:attr:`_condition`).
+
+		:returns: The expression, as written, or ``None`` if the rule has no ``if``.
+		"""
+		return self._condition
+
+	@readonly
+	def Changes(self) -> tuple[str, ...]:
+		"""
+		Read-only property to access the paths of the rule's ``changes`` (:attr:`_changes`).
+
+		:returns: The paths, as written in ``changes`` or ``changes.paths``.
+		"""
+		return self._changes
+
+	@readonly
+	def CompareTo(self) -> Nullable[str]:
+		"""
+		Read-only property to access the reference ``changes`` is compared to (:attr:`_compareTo`).
+
+		:returns: The reference of ``changes.compare_to``, or ``None``.
+		"""
+		return self._compareTo
+
+	@readonly
+	def Exists(self) -> tuple[str, ...]:
+		"""
+		Read-only property to access the paths of the rule's ``exists`` (:attr:`_exists`).
+
+		:returns: The paths, as written in ``exists`` or ``exists.paths``.
+		"""
+		return self._exists
+
+	@readonly
+	def When(self) -> Nullable[When]:
+		"""
+		Read-only property to access when the job runs, if the rule matches (:attr:`_when`).
+
+		:returns: The rule's ``when``, or ``None`` if the rule doesn't say.
+		"""
+		return self._when
+
+	@readonly
+	def AllowFailure(self) -> Nullable[bool]:
+		"""
+		Read-only property to access whether the pipeline continues when the job fails (:attr:`_allowFailure`).
+
+		:returns: The rule's ``allow_failure``, or ``None`` if the rule doesn't say.
+		"""
+		return self._allowFailure
+
+	@readonly
+	def Variables(self) -> dict[str, str]:
+		"""
+		Read-only property to access the variables set, if the rule matches (:attr:`_variables`).
+
+		:returns: The variables' values, by name.
+		"""
+		return self._variables
+
+	@staticmethod
+	def _Paths(value: Any, key: str, owner: str, entry: CommentedMap, path: Path) -> tuple[list[str], Nullable[str]]:
+		"""
+		Read the paths of ``changes`` or ``exists``: a list, or a mapping with ``paths``.
+
+		:param value:              The key's value.
+		:param key:                The key, for a message.
+		:param owner:              The element the rule belongs to, for a message.
+		:param entry:              The rule's mapping, for the key's line.
+		:param path:               Path to the configuration file.
+		:returns:                  The paths, and the reference of ``compare_to``.
+		:raises PipelineFileError: If the value is neither a list nor a mapping with a list ``paths``.
+		"""
+		compareTo = None
+		if isinstance(value, CommentedMap):
+			compareTo = value.get("compare_to", None)
+			value = value.get("paths", None)
+
+		if not isinstance(value, CommentedSeq):
+			ex = PipelineFileError(
+				f"Key '{key}' of a rule of {owner} is not a list of paths.", path, Base._KeyLine(entry, key)
+			)
+			ex.add_note(f"Got type '{getFullyQualifiedName(value)}'.")
+			raise ex
+
+		return [Base._ToText(item) for item in value], None if compareTo is None else Base._ToText(compareTo)
+
+	@classmethod
+	def _FromYAMLEntries(cls, value: Any, owner: str, path: Path, line: int) -> list[Self]:
+		"""
+		Read a ``rules`` key: a list of rules, each a mapping.
+
+		:param value:              The key's value.
+		:param owner:              The element the rules belong to, for a message, as ``job 'build'``.
+		:param path:               Path to the configuration file.
+		:param line:               Line the ``rules`` key is written at, starting at 1.
+		:returns:                  The rules, in file order.
+		:raises PipelineFileError: If the value is not a list, or a rule is not a mapping.
+		:raises PipelineFileError: If key ``when`` of a rule is not a value GitLab knows. |br|
+		                           The note lists the allowed values.
+		:raises PipelineFileError: If a key of a rule holds a value of the wrong kind.
+		"""
+		if not isinstance(value, CommentedSeq):
+			ex = PipelineFileError(f"Key 'rules' of {owner} is not a list.", path, line)
+			ex.add_note(f"Got type '{getFullyQualifiedName(value)}'.")
+			raise ex
+
+		rules = []
+		for index, entry in enumerate(value):
+			entryLine = Base._ItemLine(value, index)
+			if not isinstance(entry, CommentedMap):
+				ex = PipelineFileError(f"Rule of {owner} is not a mapping.", path, entryLine)
+				ex.add_note(f"Got type '{getFullyQualifiedName(entry)}'.")
+				raise ex
+
+			changes = None
+			compareTo = None
+			if "changes" in entry:
+				changes, compareTo = cls._Paths(entry["changes"], "changes", owner, entry, path)
+
+			exists = None
+			if "exists" in entry:
+				exists, _ = cls._Paths(entry["exists"], "exists", owner, entry, path)
+
+			when = None
+			if (whenValue := entry.get("when", None)) is not None:
+				try:
+					when = When.Parse(Base._ToText(whenValue))
+				except ValueError as cause:
+					ex = PipelineFileError(f"Key 'when' of a rule of {owner} is not a known value.", path, entryLine)
+					ex.add_note(f"Got '{whenValue}'.")
+					ex.add_note(f"Allowed values: {', '.join(member.value for member in When)}.")
+					raise ex from cause
+
+			allowFailure = Base._ToPython(entry.get("allow_failure", None))
+			if allowFailure is not None and not isinstance(allowFailure, bool):
+				ex = PipelineFileError(f"Key 'allow_failure' of a rule of {owner} is not a boolean.", path, entryLine)
+				ex.add_note(f"Got '{allowFailure}'.")
+				raise ex
+
+			variables = entry.get("variables", None)
+			if variables is not None and not isinstance(variables, CommentedMap):
+				ex = PipelineFileError(f"Key 'variables' of a rule of {owner} is not a mapping.", path, entryLine)
+				ex.add_note(f"Got type '{getFullyQualifiedName(variables)}'.")
+				raise ex
+
+			condition = entry.get("if", None)
+			rules.append(cls(
+				entryLine,
+				condition=None if condition is None else Base._ToText(condition),
+				changes=changes,
+				compareTo=compareTo,
+				exists=exists,
+				when=when,
+				allowFailure=allowFailure,
+				variables=None if variables is None else {str(k): Base._ToText(v) for k, v in variables.items()}
+			))
+
+		return rules
