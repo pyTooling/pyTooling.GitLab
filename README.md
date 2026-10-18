@@ -36,13 +36,11 @@ pip install pyTooling.GitLab
 
 ## Features
 
-🚧 The features are in development.
-
 ### Data models
 
-* 🚧 [Pipeline runs][PipelineRun] - A GitLab pipeline - its jobs, matrices and child pipelines with their times and
+* [Pipeline runs][PipelineRun] - A GitLab pipeline - its jobs, matrices and child pipelines with their times and
   outcomes - read from the GitLab REST API's payloads.
-* 🚧 [Pipeline files][PipelineFile] - A `.gitlab-ci.yml` and the files it includes: stages, jobs with their needs and
+* [Pipeline files][PipelineFile] - A `.gitlab-ci.yml` and the files it includes: stages, jobs with their needs and
   rules, variables and inputs, read with line numbers, and converted into a pipeline graph.
 
 ### Sphinx domain `glci`
@@ -53,15 +51,15 @@ The domain needs the extra `sphinx`, which installs pyTooling.Sphinx:
 pip install pyTooling.GitLab[sphinx]
 ```
 
-* 🚧 [Pipelines and their parameters][GLCIPipelines] - A pipeline file's `spec:inputs` and its described variables,
+* [Pipelines and their parameters][GLCIPipelines] - A pipeline file's `spec:inputs` and its described variables,
   taken straight from the file; roles to reference them.
-* 🚧 [Summaries][GLCISummaries] - Parameter tables, the interface, the dependencies and YAML excerpts of a pipeline
+* [Summaries][GLCISummaries] - Parameter tables, the interface, the dependencies and YAML excerpts of a pipeline
   file.
 
 ### Visualization
 
-* 🚧 [Pipeline graph][PipelineGraph] - The jobs of a pipeline file, their stages and `needs` as a Graphviz graph.
-* 🚧 [Pipeline trace diagram][PipelineTrace] - Reads a pipeline through the GitLab REST API into a trace, written as
+* [Pipeline graph][PipelineGraph] - The jobs of a pipeline file, their stages and `needs` as a Graphviz graph.
+* [Pipeline trace diagram][PipelineTrace] - Reads a pipeline through the GitLab REST API into a trace, written as
   OpenTelemetry's OTLP/JSON or drawn as a Gantt chart.
 
 ### Program
@@ -72,7 +70,7 @@ Gantt charts need the extra `diagram`, which installs matplotlib:
 pip install pyTooling.GitLab[diagram]
 ```
 
-* 🚧 [pytooling-gitlab][CLI] - The command `pipeline` reads a pipeline into a trace, writes it, and draws it as a
+* [pytooling-gitlab][CLI] - The command `pipeline` reads a pipeline into a trace, writes it, and draws it as a
   Gantt chart.
 
 [PipelineRun]: https://pyTooling.github.io/pyTooling.GitLab/Data/PipelineRun.html
