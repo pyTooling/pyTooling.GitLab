@@ -28,13 +28,13 @@
 # SPDX-License-Identifier: Apache-2.0                                                                                  #
 # ==================================================================================================================== #
 """
-Unit tests for :mod:`pyTooling.GitLab.PipelineFile`: the configuration file, its stages and variables.
+Unit tests for :mod:`pyTooling.GitLab.PipelineFile`: the configuration file, its stages, variables and jobs.
 """
 from pathlib                       import Path
 from tempfile                      import TemporaryDirectory
 from textwrap                      import dedent
 
-from pyTooling.GitLab.PipelineFile import DEFAULT_STAGES, PipelineFile, PipelineFileError, Variable
+from pyTooling.GitLab.PipelineFile import DEFAULT_STAGES, Job, PipelineFile, PipelineFileError, Variable, When
 from pyTooling.Testing             import Testcase, testsuite, testcase
 
 
@@ -343,18 +343,18 @@ class Parameters(Testcase):
 	@testcase("Parent of a variable")
 	def Parent(self) -> None:
 		"""
-		A variable's parent is a configuration file, and can't be reset to None.
+		A variable's parent is a configuration file or a job, and can't be reset to None.
 
 		Checks the TypeErrors and the ValueError.
 		"""
 		with self.assertRaises(TypeError) as context:
 			Variable("A", 1, parent=Variable("B", 1))
-		self.assertEqual("Parameter 'parent' is not of type 'PipelineFile'.", str(context.exception))
+		self.assertEqual("Parameter 'parent' is not of type 'PipelineFile' or 'Job'.", str(context.exception))
 
 		variable = Variable("A", 1)
 		with self.assertRaises(TypeError) as context:
 			variable.Parent = Variable("B", 1)
-		self.assertEqual("Parameter 'value' is not of type 'PipelineFile'.", str(context.exception))
+		self.assertEqual("Parameter 'value' is not of type 'PipelineFile' or 'Job'.", str(context.exception))
 
 		with self.assertRaises(ValueError) as context:
 			variable.Parent = None
@@ -492,3 +492,312 @@ class Errors(Fixture):
 			PipelineFile.FromFile(self._Write("variables:\n  A:\n    secret: b\n"))
 
 		self.assertIn("Allowed keys: value, description, options, expand.", context.exception.__notes__)
+
+
+@testsuite("Jobs")
+class Jobs(Fixture):
+	"""Reading the jobs of a configuration file, and constructing jobs."""
+
+	@testcase("Jobs and hidden jobs")
+	def Kinds(self) -> None:
+		"""
+		A top-level key, which isn't a global keyword, is a job; one starting with a dot a hidden job.
+
+		Checks the collections, the counters and the iterators.
+		"""
+		pipelineFile = PipelineFile.FromFile(DATA / "Jobs.yml")
+
+		self.assertEqual(["build", "test", "deploy"], list(pipelineFile.Jobs))
+		self.assertEqual(["build", "test", "deploy"], [job.Name for job in pipelineFile.IterateJobs()])
+		self.assertEqual(3, pipelineFile.JobCount)
+		self.assertTrue(pipelineFile.ContainsJob("build"))
+		self.assertFalse(pipelineFile.ContainsJob(".template"))
+
+		self.assertEqual([".template"], list(pipelineFile.HiddenJobs))
+		self.assertEqual([".template"], [job.Name for job in pipelineFile.IterateHiddenJobs()])
+		self.assertTrue(pipelineFile.HiddenJobs[".template"].IsHidden)
+		for job in pipelineFile.IterateJobs():
+			self.assertFalse(job.IsHidden)
+
+	@testcase("Parent, file and location")
+	def Location(self) -> None:
+		"""
+		A job knows its file and the line its name is written at; its variables have the job as parent.
+
+		Checks job 'build' and its variable.
+		"""
+		pipelineFile = PipelineFile.FromFile(DATA / "Jobs.yml")
+		build = pipelineFile.Jobs["build"]
+
+		self.assertIs(pipelineFile, build.Parent)
+		self.assertIs(pipelineFile, build.PipelineFile)
+		self.assertEqual(10, build.Line)
+		self.assertEqual("Jobs.yml:10", build.Location)
+		self.assertEqual("build", str(build))
+		self.assertEqual("Jobs.yml", str(pipelineFile))
+
+		variable = build.Variables["CONFIGURATION"]
+		self.assertIs(build, variable.Parent)
+		self.assertIs(pipelineFile, variable.PipelineFile)
+		self.assertEqual("release", variable.Value)
+
+	@testcase("Job 'build'")
+	def Build(self) -> None:
+		"""
+		Stage, image and service names from mappings, tags, and a script with nested lists.
+
+		Checks job 'build'.
+		"""
+		build = PipelineFile.FromFile(DATA / "Jobs.yml").Jobs["build"]
+
+		self.assertEqual("build", build.Stage)
+		self.assertEqual("python:3.14", build.Image)
+		self.assertEqual(("postgres:17", "redis:8"), build.Services)
+		self.assertEqual(("linux", "docker"), build.Tags)
+		self.assertEqual(('echo "build"', 'echo "nested"', 'echo "lists"'), build.Script)
+		self.assertEqual((), build.BeforeScript)
+		self.assertIsNone(build.When)
+		self.assertIsNone(build.AllowFailure)
+
+	@testcase("Job 'test'")
+	def Test(self) -> None:
+		"""
+		A job without stage is in 'test'; 'when' and the exit codes it may fail with.
+
+		Checks job 'test'.
+		"""
+		test = PipelineFile.FromFile(DATA / "Jobs.yml").Jobs["test"]
+
+		self.assertEqual("test", test.Stage)
+		self.assertEqual(("pytest", ), test.Script)
+		self.assertIs(When.Manual, test.When)
+		self.assertIs(True, test.AllowFailure)
+		self.assertEqual((137, 255), test.AllowedExitCodes)
+		self.assertIsNone(test.Image)
+
+	@testcase("Job 'deploy'")
+	def Deploy(self) -> None:
+		"""
+		The environment's name from a mapping, 'allow_failure' as boolean, before and after scripts.
+
+		Checks job 'deploy'.
+		"""
+		deploy = PipelineFile.FromFile(DATA / "Jobs.yml").Jobs["deploy"]
+
+		self.assertEqual("deploy", deploy.Stage)
+		self.assertEqual("production", deploy.Environment)
+		self.assertIs(True, deploy.AllowFailure)
+		self.assertEqual((), deploy.AllowedExitCodes)
+		self.assertEqual(('echo "before"', ), deploy.BeforeScript)
+		self.assertEqual(('echo "after"', ), deploy.AfterScript)
+
+	@testcase("Constructed")
+	def Constructed(self) -> None:
+		"""
+		A job constructed with a file as parent is attached to it; a variable passed to a job takes it as parent.
+
+		Constructs a file, a job and a hidden job.
+		"""
+		pipelineFile = PipelineFile(Path(".gitlab-ci.yml"))
+		variable = Variable("A", 4, "a")
+		job = Job("build", 3, "build", When.Always, False, [1], ["make"], variables=[variable], parent=pipelineFile)
+		hidden = Job(".template", 7, parent=pipelineFile)
+
+		self.assertIs(job, pipelineFile.Jobs["build"])
+		self.assertIs(hidden, pipelineFile.HiddenJobs[".template"])
+		self.assertIs(job, variable.Parent)
+		self.assertIs(pipelineFile, variable.PipelineFile)
+		self.assertEqual("test", hidden.Stage)
+
+	@testcase("Attached by the file")
+	def Attached(self) -> None:
+		"""
+		A job passed to a file takes it as parent, and its variables take the file too.
+
+		Constructs a job with a variable, then a file with the job.
+		"""
+		variable = Variable("A", 4)
+		job = Job("build", 3, variables=[variable])
+		pipelineFile = PipelineFile(Path(".gitlab-ci.yml"), jobs=[job])
+
+		self.assertIs(pipelineFile, job.Parent)
+		self.assertIs(pipelineFile, variable.PipelineFile)
+		self.assertEqual("line 3", Job("x", 3).Location)
+
+
+@testsuite("Parameter checks of jobs")
+class JobParameters(Testcase):
+	"""The job's constructor rejects parameters of the wrong type or value."""
+
+	@testcase("Name")
+	def Name(self) -> None:
+		"""
+		A job's name is a non-empty string.
+
+		Checks the ValueErrors and the TypeError.
+		"""
+		with self.assertRaises(ValueError) as context:
+			Job(None, 1)
+		self.assertEqual("Parameter 'name' is None.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Job(1, 1)
+		self.assertEqual("Parameter 'name' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(ValueError) as context:
+			Job("", 1)
+		self.assertEqual("Parameter 'name' is empty.", str(context.exception))
+
+	@testcase("Stage")
+	def Stage(self) -> None:
+		"""
+		A job's stage is a non-empty string.
+
+		Checks the ValueErrors and the TypeError.
+		"""
+		with self.assertRaises(ValueError) as context:
+			Job("a", 1, None)
+		self.assertEqual("Parameter 'stage' is None.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Job("a", 1, 1)
+		self.assertEqual("Parameter 'stage' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(ValueError) as context:
+			Job("a", 1, "")
+		self.assertEqual("Parameter 'stage' is empty.", str(context.exception))
+
+	@testcase("Scalars")
+	def Scalars(self) -> None:
+		"""
+		'when' is a When, 'allowFailure' a boolean, 'image' and 'environment' strings.
+
+		Checks each TypeError.
+		"""
+		with self.assertRaises(TypeError) as context:
+			Job("a", 1, when="manual")
+		self.assertEqual("Parameter 'when' is not of type 'When'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Job("a", 1, allowFailure="yes")
+		self.assertEqual("Parameter 'allowFailure' is not of type 'bool'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Job("a", 1, image=1)
+		self.assertEqual("Parameter 'image' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Job("a", 1, environment=1)
+		self.assertEqual("Parameter 'environment' is not of type 'str'.", str(context.exception))
+
+	@testcase("Collections")
+	def Collections(self) -> None:
+		"""
+		Exit codes are integers, script lines, services and tags strings, variables Variables.
+
+		Checks each TypeError.
+		"""
+		with self.assertRaises(TypeError) as context:
+			Job("a", 1, allowedExitCodes=[True])
+		self.assertEqual("An element of parameter 'allowedExitCodes' is not of type 'int'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Job("a", 1, script=["make", 1])
+		self.assertEqual("An element of parameter 'script' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Job("a", 1, afterScript=[1])
+		self.assertEqual("An element of parameter 'afterScript' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Job("a", 1, tags=[1])
+		self.assertEqual("An element of parameter 'tags' is not of type 'str'.", str(context.exception))
+
+		with self.assertRaises(TypeError) as context:
+			Job("a", 1, variables=["A"])
+		self.assertEqual("An element of parameter 'variables' is not of type 'Variable'.", str(context.exception))
+
+	@testcase("Jobs of a file")
+	def FileJobs(self) -> None:
+		"""
+		A file's jobs are of type Job.
+
+		Checks the TypeError.
+		"""
+		with self.assertRaises(TypeError) as context:
+			PipelineFile(Path(".gitlab-ci.yml"), jobs=["build"])
+		self.assertEqual("An element of parameter 'jobs' is not of type 'Job'.", str(context.exception))
+
+
+@testsuite("Malformed jobs")
+class JobErrors(Fixture):
+	"""A malformed job raises PipelineFileError, naming file and line."""
+
+	@testcase("Job not a mapping")
+	def NotAMapping(self) -> None:
+		"""
+		A job is a mapping.
+
+		Checks message and line.
+		"""
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("variables: {}\nbuild: make\n"))
+		self.assertEqual("Job 'build' is not a mapping.", str(context.exception))
+		self.assertEqual(2, context.exception.Line)
+
+	@testcase("Undeclared stage")
+	def UndeclaredStage(self) -> None:
+		"""
+		A job's stage is one of the pipeline's stages.
+
+		Checks message, line and note.
+		"""
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("stages: [build]\nlint:\n  stage: check\n  script: make\n"))
+		self.assertEqual("Job 'lint' is in stage 'check', which isn't declared.", str(context.exception))
+		self.assertEqual(2, context.exception.Line)
+		self.assertIn("Stages: .pre, build, .post.", context.exception.__notes__)
+
+	@testcase("Unknown 'when'")
+	def UnknownWhen(self) -> None:
+		"""
+		Key 'when' holds a value GitLab knows.
+
+		Checks message and note.
+		"""
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("build:\n  when: sometimes\n"))
+		self.assertEqual("Key 'when' of job 'build' is not a known value.", str(context.exception))
+		self.assertEqual(2, context.exception.Line)
+		self.assertIn(
+			"Allowed values: on_success, on_failure, never, always, manual, delayed.", context.exception.__notes__
+		)
+
+	@testcase("Keys of the wrong kind")
+	def WrongKinds(self) -> None:
+		"""
+		'allow_failure' is a boolean or a mapping, 'services' and 'tags' lists, a script no mapping, 'variables' a mapping.
+
+		Checks message and line of each error.
+		"""
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("build:\n  allow_failure: maybe\n"))
+		self.assertEqual("Key 'allow_failure' of job 'build' is not a boolean.", str(context.exception))
+		self.assertEqual(2, context.exception.Line)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("build:\n  services: postgres\n"))
+		self.assertEqual("Key 'services' of job 'build' is not a list.", str(context.exception))
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("build:\n  tags: linux\n"))
+		self.assertEqual("Key 'tags' of job 'build' is not a list.", str(context.exception))
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("build:\n  script:\n    run: make\n"))
+		self.assertEqual("Key 'script' of job 'build' is not a script.", str(context.exception))
+		self.assertEqual(2, context.exception.Line)
+
+		with self.assertRaises(PipelineFileError) as context:
+			PipelineFile.FromFile(self._Write("build:\n  variables: [A]\n"))
+		self.assertEqual("Key 'variables' of job 'build' is not a mapping.", str(context.exception))
