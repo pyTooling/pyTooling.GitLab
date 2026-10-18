@@ -1,0 +1,32 @@
+# A configuration including files in every way 'include' allows, and a default.
+include:
+  - local: /ci/build.yml
+  - /ci/test.yml
+  - https://example.com/ci/remote.yml
+  - project: group/shared
+    ref: v1.0
+    file:
+      - /templates/a.yml
+      - /templates/b.yml
+  - project: group/single
+    file: /templates/c.yml
+  - template: Auto-DevOps.gitlab-ci.yml
+  - component: $CI_SERVER_FQDN/group/components/lint@1.2
+    inputs:
+      stage: test
+      strict: true
+    rules:
+      - if: $LINT == "yes"
+
+default:
+  image:
+    name: python:3.14
+  services: [postgres:17]
+  tags: [linux]
+  before_script:
+    - echo "default before"
+
+after_script: echo "global after"
+
+build:
+  script: make

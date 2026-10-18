@@ -31,6 +31,9 @@ The Tree
    - :class:`~pyTooling.GitLab.PipelineFile.PipelineFile` | a configuration file
      - :class:`~pyTooling.GitLab.PipelineFile.Workflow`   | the ``workflow`` key
        - :class:`~pyTooling.GitLab.PipelineFile.Rule`     | a rule deciding whether a pipeline is created
+     - :class:`~pyTooling.GitLab.PipelineFile.Include`    | an entry of ``include``
+       - :class:`~pyTooling.GitLab.PipelineFile.Rule`     | a rule deciding whether the file is included
+     - :class:`~pyTooling.GitLab.PipelineFile.Default`    | the ``default`` key
      - :class:`~pyTooling.GitLab.PipelineFile.Variable`   | a default variable, declared in the top-level ``variables``
      - :class:`~pyTooling.GitLab.PipelineFile.Job`        | a job or a hidden job, in file order
        - :class:`~pyTooling.GitLab.PipelineFile.Need`     | an entry of the job's ``needs``
@@ -184,6 +187,43 @@ and its :attr:`~pyTooling.GitLab.PipelineFile.Workflow.Rules` -, or ``None`` for
        - if: $CI_COMMIT_TAG
          when: never
        - when: always
+
+
+.. _DATA/PipelineFile/Includes:
+
+Includes and Defaults
+*********************
+
+Each entry of ``include`` is an :class:`~pyTooling.GitLab.PipelineFile.Include`, whose
+:attr:`~pyTooling.GitLab.PipelineFile.Include.Kind` says where the files come from and whose
+:attr:`~pyTooling.GitLab.PipelineFile.Include.Location` names them, as written:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - ``include`` entry
+     - :class:`~pyTooling.GitLab.PipelineFile.IncludeKind`, :attr:`~pyTooling.GitLab.PipelineFile.Include.Location`
+   * - ``/ci/build.yml`` or ``local: /ci/build.yml``
+     - ``Local``, the path
+   * - ``https://example.com/ci.yml`` or ``remote: ...``
+     - ``Remote``, the URL
+   * - ``project: group/shared``, ``file``, ``ref``
+     - ``Project``, the project's path; :attr:`~pyTooling.GitLab.PipelineFile.Include.Files` and
+       :attr:`~pyTooling.GitLab.PipelineFile.Include.Ref`
+   * - ``template: Auto-DevOps.gitlab-ci.yml``
+     - ``Template``, the template's name
+   * - ``component: $CI_SERVER_FQDN/group/components/lint@1.2``
+     - ``Component``, the component's reference
+
+An include's :attr:`~pyTooling.GitLab.PipelineFile.Include.Inputs` keep the types they are written with, and its
+:attr:`~pyTooling.GitLab.PipelineFile.Include.Rules` decide whether the files are included. The included files
+themselves aren't read.
+
+:attr:`PipelineFile.Default <pyTooling.GitLab.PipelineFile.PipelineFile.Default>` holds the ``default`` key as a
+:class:`~pyTooling.GitLab.PipelineFile.Default` - image, services, tags and the scripts around a job's script. The
+global keywords ``image``, ``services``, ``before_script`` and ``after_script``, deprecated forms of ``default``, are
+read into it too, unless ``default`` sets them.
 
 
 .. _DATA/PipelineFile/Lines:
