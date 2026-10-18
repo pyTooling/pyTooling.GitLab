@@ -50,10 +50,10 @@ Features
 Data models
 ===========
 
-🚧 :ref:`Pipeline runs <DATA/PipelineRun>`
+:ref:`Pipeline runs <DATA/PipelineRun>`
   |rarr| A GitLab pipeline - its jobs, matrices and child pipelines with their times and outcomes - read from the
   GitLab REST API's payloads.
-🚧 :ref:`Pipeline files <DATA/PipelineFile>`
+:ref:`Pipeline files <DATA/PipelineFile>`
   |rarr| A :file:`.gitlab-ci.yml` and the files it includes: stages, jobs with their needs and rules, variables and
   inputs, read with line numbers, and converted into a pipeline graph.
 
@@ -66,18 +66,18 @@ The domain needs the extra ``sphinx``, which installs pyTooling.Sphinx:
 
    pip install pyTooling.GitLab[sphinx]
 
-🚧 :ref:`Pipelines and their parameters <GLCI/Pipeline>`
+:ref:`Pipelines and their parameters <GLCI/Pipeline>`
   |rarr| A pipeline file's ``spec:inputs`` and its described variables, taken straight from the file; roles to
   reference them.
-🚧 :ref:`Summaries <GLCI/Summaries>`
+:ref:`Summaries <GLCI/Summaries>`
   |rarr| Parameter tables, the interface, the dependencies and YAML excerpts of a pipeline file.
 
 Visualization
 =============
 
-🚧 :ref:`Pipeline graph <VIS/PipelineGraph>`
+:ref:`Pipeline graph <VIS/PipelineGraph>`
   |rarr| The jobs of a pipeline file, their stages and ``needs`` as a Graphviz graph.
-🚧 :ref:`Pipeline trace diagram <VIS/PipelineTrace>`
+:ref:`Pipeline trace diagram <VIS/PipelineTrace>`
   |rarr| Reads a pipeline through the GitLab REST API into a trace, written as OpenTelemetry's OTLP/JSON or drawn as a
   Gantt chart.
 
@@ -90,7 +90,7 @@ Gantt charts need the extra ``diagram``, which installs matplotlib:
 
    pip install pyTooling.GitLab[diagram]
 
-🚧 :ref:`pytooling-gitlab <CLI>`
+:ref:`pytooling-gitlab <CLI>`
   |rarr| The command ``pipeline`` reads a pipeline into a trace, writes it, and draws it as a Gantt chart.
 
 
