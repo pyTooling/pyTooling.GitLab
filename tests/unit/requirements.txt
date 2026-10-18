@@ -9,7 +9,7 @@ pytest-cov ~= 7.1
 pytest-xdist ~= 3.8
 
 # For pyTooling.GitLab.Sphinx testing - requires Sphinx 9.1, which requires Python 3.12
-pyTooling.Sphinx @ git+https://github.com/pyTooling/pyTooling.Sphinx.git@dev ; python_version >= "3.12"
+pyTooling.Sphinx ~= 0.1.0rc3 ; python_version >= "3.12"
 
 # For rendering a pipeline's trace - PyPI has no wheel of matplotlib for PyPy on Windows, and no Pillow wheel for PyPy
 # 8.0 on Linux (building it from source fails there). Remove the 'implementation_version' limit once Pillow and
