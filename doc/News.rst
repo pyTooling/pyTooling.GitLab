@@ -24,3 +24,9 @@ Version 0.x (2026)
    * Visualization: the :ref:`pipeline graph <VIS/PipelineGraph>` of a pipeline file, and the :ref:`trace of a
      pipeline <VIS/PipelineTrace>` as OTLP/JSON and as a Gantt chart.
    * The program :ref:`pytooling-gitlab <CLI>` reads a pipeline into a trace, writes it, and draws it.
+
+   .. rubric:: Changes
+
+   * :class:`~pyTooling.GitLab.PipelineFile.NeedKind` is a plain :class:`~enum.Enum` with integer values instead of a
+     :class:`~pyTooling.Common.StringEnum`, as its values are neither read from nor written to text; a message names
+     a member by its name.

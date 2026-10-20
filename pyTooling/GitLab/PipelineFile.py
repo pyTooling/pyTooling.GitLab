@@ -64,6 +64,7 @@ back to the jobs they were built from.
 """
 from __future__               import annotations
 
+from enum                     import Enum
 from itertools                import product
 from pathlib                  import Path
 from typing                   import Any, ClassVar, Generic, Hashable, Iterable, Iterator, Mapping, Optional as Nullable
@@ -194,13 +195,13 @@ class TriggerStrategy(StringEnum):
 
 
 @export
-class NeedKind(StringEnum):
+class NeedKind(Enum):
 	"""What an entry of ``needs`` refers to."""
 
-	Job =            "job"              #: A job of the same pipeline.
-	PipelineJob =    "pipeline-job"     #: A job of another pipeline in the same parent-child hierarchy.
-	ProjectJob =     "project-job"      #: A job of another project's pipeline, whose artifacts are downloaded.
-	PipelineStatus = "pipeline-status"  #: The status of another project's pipeline, which the job mirrors.
+	Job =            1  #: A job of the same pipeline.
+	PipelineJob =    2  #: A job of another pipeline in the same parent-child hierarchy.
+	ProjectJob =     3  #: A job of another project's pipeline, whose artifacts are downloaded.
+	PipelineStatus = 4  #: The status of another project's pipeline, which the job mirrors.
 
 
 @export
@@ -2292,7 +2293,7 @@ class Need(Base[Job]):
 		):
 			if text is None and kind in kinds:
 				ex = ValueError(f"Parameter '{parameterName}' is None.")
-				ex.add_note(f"A need of kind '{kind.value}' needs it.")
+				ex.add_note(f"A need of kind '{kind.name}' needs it.")
 				raise ex
 
 		self._kind =      kind
