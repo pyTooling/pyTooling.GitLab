@@ -968,7 +968,7 @@ class NeedParameters(Testcase):
 		with self.assertRaises(ValueError) as context:
 			Need(None, 1)
 		self.assertEqual("Parameter 'job' is None.", str(context.exception))
-		self.assertEqual(["A need of kind 'job' needs it."], context.exception.__notes__)
+		self.assertEqual(["A need of kind 'Job' needs it."], context.exception.__notes__)
 
 		with self.assertRaises(ValueError) as context:
 			Need(None, 1, NeedKind.PipelineStatus)
