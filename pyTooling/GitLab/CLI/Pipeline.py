@@ -44,7 +44,6 @@ The :pycode:`pipeline` command: read a CI pipeline and write what it took.
    See :ref:`high-level help <CLI/Pipeline>` for explanations and usage examples.
 """
 from argparse                                 import Namespace
-from datetime                                 import timedelta
 from os                                       import getenv
 from pathlib                                  import Path
 from typing                                   import ClassVar, Optional as Nullable
@@ -274,8 +273,4 @@ class PipelineHandlers(metaclass=ExtendedType, mixin=True):
 		"""
 		self.WriteNormal(f"Pipeline:  {trace.Name}")
 		self.WriteNormal(f"Began:     {trace.StartTime}")
-		# WORKAROUND: pyTooling <10.0.0rc4
-		#   self.WriteNormal(f"Wall time: {trace.DurationInSeconds:.0f} s")
-		duration = trace.Duration
-		seconds =  duration.total_seconds() if isinstance(duration, timedelta) else duration
-		self.WriteNormal(f"Wall time: {seconds:.0f} s")
+		self.WriteNormal(f"Wall time: {trace.DurationInSeconds:.0f} s")
