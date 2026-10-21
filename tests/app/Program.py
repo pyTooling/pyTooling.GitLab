@@ -57,7 +57,7 @@ class ProgramMixin:
 	:exc:`~pyTooling.Exceptions.BaseClassWithoutSlotsError`.
 	"""
 
-	_consoleScript: ClassVar[str] = "pytooling-gitlab"  #: The console script under test.
+	_CONSOLE_SCRIPT: ClassVar[str] = "pytooling-gitlab"  #: The console script under test.
 
 	def Output(self, result: CompletedProcess) -> str:
 		"""
