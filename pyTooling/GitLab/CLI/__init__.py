@@ -65,7 +65,7 @@ class Application(TerminalApplication, PipelineHandlers, ArgParseHelperMixin):
 	which this class inherits from - so a new command is a new mixin and one more base-class, and nothing here has
 	to know what it does.
 	"""
-	HeadLine: ClassVar[str] = "pyTooling.GitLab Service Program"  #: Headline printed above every command's output.
+	HEADLINE: ClassVar[str] = "pyTooling.GitLab Service Program"  #: Headline printed above every command's output.
 
 	def __init__(self) -> None:
 		"""Initializes the program, its terminal and its command line parser."""
@@ -91,7 +91,7 @@ class Application(TerminalApplication, PipelineHandlers, ArgParseHelperMixin):
 			self,
 			prog="pytooling-gitlab",
 			description=dedent(f"""\
-				'{self.HeadLine}' to work with GitLab pipelines.
+				'{self.HEADLINE}' to work with GitLab pipelines.
 				"""),
 			formatter_class=HelpFormatter,
 			add_help=False
@@ -161,12 +161,12 @@ def main() -> NoReturn:
 	except MissingDependencyError as ex:
 		program.PrintMissingDependencyError(ex)
 	except ToolingException as ex:
-		program.WriteLineToStdErr(f"{{RED}}[ERROR] {ex}{{NOCOLOR}}".format(**program.Foreground))
+		program.WriteLineToStdErr(f"{{RED}}[ERROR] {ex}{{NOCOLOR}}".format(**program.FOREGROUND))
 		if ex.__cause__ is not None:
-			program.WriteLineToStdErr(f"{{DARK_YELLOW}}Because of: {ex.__cause__}{{NOCOLOR}}".format(**program.Foreground))
+			program.WriteLineToStdErr(f"{{DARK_YELLOW}}Because of: {ex.__cause__}{{NOCOLOR}}".format(**program.FOREGROUND))
 
 		for note in getattr(ex, "__notes__", ()) or ():
-			program.WriteLineToStdErr(f"{{DARK_YELLOW}} [NOTE] {note}{{NOCOLOR}}".format(**program.Foreground))
+			program.WriteLineToStdErr(f"{{DARK_YELLOW}} [NOTE] {note}{{NOCOLOR}}".format(**program.FOREGROUND))
 		program.Exit(1)
 	except ExceptionBase as ex:
 		program.PrintExceptionBase(ex)
