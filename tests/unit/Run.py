@@ -31,10 +31,10 @@
 """
 Unit tests for the pipeline run model of :mod:`pyTooling.GitLab`.
 """
-from datetime              import datetime, timedelta, timezone
+from datetime              import datetime, timezone
 from json                  import dumps as json_dumps, loads as json_loads
 from pathlib               import Path
-from typing                import Any, Union
+from typing                import Any
 from unittest              import mock
 
 from pyTooling.CI          import Matrix, Outcome
@@ -49,18 +49,6 @@ if __name__ == "__main__":  # pragma: no cover
 	print("ERROR: you called a testcase declaration file as an executable module.")
 	print("Use: 'python -m unittest <testcase module>'")
 	exit(1)
-
-
-def _seconds(duration: Union[float, timedelta]) -> float:
-	"""
-	Return a duration in seconds, as pyTooling reports it before and after 10.0.0rc4.
-
-	:param duration: The duration, a :class:`float` of seconds (before) or a :class:`~datetime.timedelta` (after).
-	:returns:        The duration in seconds.
-	"""
-	# WORKAROUND: pyTooling <10.0.0rc4
-	#   <element>.DurationInSeconds
-	return duration.total_seconds() if isinstance(duration, timedelta) else duration
 
 
 def _time(seconds: int) -> str:
@@ -226,7 +214,7 @@ class Jobs(Testcase):
 		self.assertEqual(_datetime(0), job.CreatedAt)
 		self.assertEqual(_datetime(10), job.StartedAt)
 		self.assertEqual(_datetime(70), job.CompletedAt)
-		self.assertEqual(60.0, _seconds(job.Duration))
+		self.assertEqual(60.0, job.DurationInSeconds)
 		self.assertEqual(1.5, job.QueuedDuration)
 		self.assertEqual("https://gitlab.com/group/project/-/jobs/100", str(job.URL))
 		self.assertEqual(["linux"], job.Tags)
@@ -588,7 +576,7 @@ class Pipelines(Testcase):
 		self.assertEqual("abc123", pipeline.SHA)
 		self.assertFalse(pipeline.IsTag)
 		self.assertEqual(2.0, pipeline.QueuedDuration)
-		self.assertEqual(595.0, _seconds(pipeline.Duration))
+		self.assertEqual(595.0, pipeline.DurationInSeconds)
 		self.assertEqual("https://gitlab.com/group/project/-/pipelines/4711", str(pipeline.URL))
 		self.assertIs(pipeline, pipeline.Pipeline)
 
