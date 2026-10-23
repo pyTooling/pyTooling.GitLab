@@ -51,12 +51,12 @@ named like the job, and the jobs of a child pipeline below a timespan named like
 from datetime              import datetime, timedelta
 from typing                import Any, ClassVar, Iterable, Mapping, Optional as Nullable, Self, Union
 
-from pyTooling.CI          import Base, JobGroup, JSONObject, Matrix
+from pyTooling.CI          import Base, JobGroup, Matrix
 from pyTooling.Common      import getFullyQualifiedName
 from pyTooling.Decorators  import export
 from pyTooling.GitLab      import DownstreamPipeline, GitLabError, Job, MatrixJob, Pipeline, ProjectClient, Status
 from pyTooling.MetaClasses import ExtendedType
-from pyTooling.REST        import RESTError
+from pyTooling.REST        import JSONObject, RESTError
 from pyTooling.Tracing     import Span
 from pyTooling.Tracing.CI  import OTLP, Result
 from pyTooling.Tracing.CI  import JobSpan as CIJobSpan, MatrixSpan as CIMatrixSpan
