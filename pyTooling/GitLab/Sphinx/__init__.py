@@ -892,8 +892,8 @@ def setup(sphinx: Sphinx) -> dict[str, Any]:
 	"""
 	from pyTooling.GitLab                  import __version__
 	from pyTooling.GitLab.Sphinx.Graph     import PipelineGraph, resolveLinks
-	from pyTooling.GitLab.Sphinx.Reference import AutoInputs, Dependencies, Interface, ParameterTable, YAMLExcerpt
-	from pyTooling.GitLab.Sphinx.Reference import checkUndocumentedInputs
+	from pyTooling.GitLab.Sphinx.Reference import AutoInputs, Dependencies, Interface, ParameterTable, YAMLExcerpt, \
+	                                              checkUndocumentedInputs
 
 	sphinx.setup_extension("pyTooling.Sphinx")
 

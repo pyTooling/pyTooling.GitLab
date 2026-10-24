@@ -58,10 +58,9 @@ from pyTooling.GitLab      import DownstreamPipeline, GitLabError, Job, MatrixJo
 from pyTooling.MetaClasses import ExtendedType
 from pyTooling.REST        import JSONObject, RESTError
 from pyTooling.Tracing     import Span
-from pyTooling.Tracing.CI  import OTLP, Result
-from pyTooling.Tracing.CI  import JobSpan as CIJobSpan, MatrixSpan as CIMatrixSpan
-from pyTooling.Tracing.CI  import PipelineTrace as CIPipelineTrace, QueuedSpan as CIQueuedSpan
-from pyTooling.Tracing.CI  import WorkflowSpan as CIWorkflowSpan
+from pyTooling.Tracing.CI  import OTLP, Result, JobSpan as CIJobSpan, MatrixSpan as CIMatrixSpan, \
+                                  PipelineTrace as CIPipelineTrace, QueuedSpan as CIQueuedSpan, \
+                                  WorkflowSpan as CIWorkflowSpan
 
 
 @export

@@ -54,9 +54,9 @@ from http                      import HTTPMethod
 from json                      import loads as json_loads
 from typing                    import Optional as Nullable, Any, ClassVar, Hashable, Iterable, Mapping, Self, Union
 
-from pyTooling.CI              import CIError, MatrixInstanceMixin, Outcome
-from pyTooling.CI              import Job as CIJob, JobGroup as CIJobGroup, Matrix as CIMatrix
-from pyTooling.CI              import Pipeline as CIPipeline, PipelineGroup as CIPipelineGroup, Workflow as CIWorkflow
+from pyTooling.CI              import CIError, MatrixInstanceMixin, Outcome, Job as CIJob, JobGroup as CIJobGroup, \
+                                      Matrix as CIMatrix, Pipeline as CIPipeline, PipelineGroup as CIPipelineGroup, \
+                                      Workflow as CIWorkflow
 from pyTooling.Common          import getFullyQualifiedName, parseISO8601Timestamp, StringEnum
 from pyTooling.Decorators      import export, readonly
 from pyTooling.GenericPath.URL import URL

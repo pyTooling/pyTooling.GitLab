@@ -37,11 +37,10 @@ from pathlib                       import Path
 from tempfile                      import TemporaryDirectory
 from textwrap                      import dedent
 
-from pyTooling.GitLab.PipelineFile import DEFAULT_STAGES, Job, Need, NeedKind, PipelineFile, PipelineFileError
-from pyTooling.GitLab.PipelineFile import Default, Include, IncludeKind, Parallel, Rule, Trigger, TriggerStrategy
-from pyTooling.GitLab.PipelineFile import Input, InputType, Variable, Workflow
-from pyTooling.GitLab.PipelineFile import DefinedJob, DefinedMatrix, DefinedMatrixJob, DefinedPipeline
-from pyTooling.GitLab.PipelineFile import DefinedWorkflow, IncludeResolver
+from pyTooling.GitLab.PipelineFile import DEFAULT_STAGES, Job, Need, NeedKind, PipelineFile, PipelineFileError, \
+                                          Default, Include, IncludeKind, Parallel, Rule, Trigger, TriggerStrategy, \
+                                          Input, InputType, Variable, Workflow, DefinedJob, DefinedMatrix, \
+                                          DefinedMatrixJob, DefinedPipeline, DefinedWorkflow, IncludeResolver
 from pyTooling.CI                  import RuleOutcome
 from pyTooling.Testing             import Testcase, testsuite, testcase
 
