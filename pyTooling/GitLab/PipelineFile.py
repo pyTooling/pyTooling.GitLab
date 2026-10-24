@@ -67,12 +67,12 @@ from __future__               import annotations
 from enum                     import Enum
 from itertools                import product
 from pathlib                  import Path
-from typing                   import Any, ClassVar, Generic, Hashable, Iterable, Iterator, Mapping, Optional as Nullable
-from typing                   import Self, Sequence, TypeVar, Union
+from typing                   import Any, ClassVar, Generic, Hashable, Iterable, Iterator, Mapping, \
+                                     Optional as Nullable, Self, Sequence, TypeVar, Union
 
-from pyTooling.CI             import DependencyMixin, Job as CIJob, JobGroup, Matrix as CIMatrix
-from pyTooling.CI             import MatrixJob as CIMatrixJob, MatrixWorkflow as CIMatrixWorkflow
-from pyTooling.CI             import Pipeline as CIPipeline, Rule as CIRule, RuleOutcome, Workflow as CIWorkflow
+from pyTooling.CI             import DependencyMixin, Job as CIJob, JobGroup, Matrix as CIMatrix, \
+                                     MatrixJob as CIMatrixJob, MatrixWorkflow as CIMatrixWorkflow, \
+                                     Pipeline as CIPipeline, Rule as CIRule, RuleOutcome, Workflow as CIWorkflow
 
 from pyTooling.Common         import getFullyQualifiedName, StringEnum
 from pyTooling.Decorators     import export, readonly

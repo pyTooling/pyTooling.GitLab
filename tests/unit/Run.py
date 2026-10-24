@@ -38,9 +38,8 @@ from typing                import Any
 from unittest              import mock
 
 from pyTooling.CI          import Matrix, Outcome
-from pyTooling.GitLab      import DownstreamPipeline, GitLabError, Job, MatrixDownstreamPipeline, MatrixJob, Pipeline
-from pyTooling.GitLab      import PipelineGroup, ProjectClient, Source, Status
-from pyTooling.GitLab      import STATUS_TO_OUTCOME
+from pyTooling.GitLab      import DownstreamPipeline, GitLabError, Job, MatrixDownstreamPipeline, MatrixJob, Pipeline, \
+                                  PipelineGroup, ProjectClient, Source, Status, STATUS_TO_OUTCOME
 from pyTooling.REST        import RESTError
 from pyTooling.Testing     import Testcase, testsuite, testcase
 
