@@ -34,6 +34,7 @@ Unit tests for :mod:`pyTooling.GitLab.Sphinx.Graph`: the pipeline graph of a pip
 The DOT is checked as :class:`~pyTooling.GitLab.Sphinx.Graph.PipelineDotGraph` writes it, and as a Sphinx build hands it
 to :mod:`sphinx.ext.graphviz`.
 """
+from io                       import StringIO
 from pathlib                  import Path
 from shutil                   import which
 from subprocess               import run as subprocess_run
@@ -443,8 +444,6 @@ class Directive(Project):
 
 	def setUp(self) -> None:
 		super().setUp()
-		from io import StringIO
-
 		self._warnings = StringIO()
 
 	@testcase("Link to the child pipeline's page")
