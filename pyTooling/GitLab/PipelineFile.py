@@ -460,7 +460,7 @@ class PipelineFile(Base[None]):
 		self._jobs =         {}
 		self._hiddenJobs =   {}
 		self._workflow =     None
-		self._includes =     []
+		self._includes =     includeList = []
 		self._default =      None
 		self._inputs =       {}
 		self._description =  description
@@ -509,7 +509,7 @@ class PipelineFile(Base[None]):
 					ex.add_note(f"Got type '{getFullyQualifiedName(include)}'.")
 					raise ex
 
-				self._includes.append(include)
+				includeList.append(include)
 				include.Parent = self
 
 		if default is not None:
@@ -1491,7 +1491,7 @@ class Job(Base[PipelineFile]):
 		self._name =         name
 		self._stage =        stage
 		self._needs =        None
-		self._rules =        []
+		self._rules =        ruleList = []
 		self._inputs =       {}
 		self._parallel =     None
 		self._trigger =      None
@@ -1502,14 +1502,14 @@ class Job(Base[PipelineFile]):
 		self._variables =    {}
 
 		if needs is not None:
-			self._needs = []
+			self._needs = needList = []
 			for need in needs:
 				if not isinstance(need, Need):
 					ex = TypeError("An element of parameter 'needs' is not of type 'Need'.")
 					ex.add_note(f"Got type '{getFullyQualifiedName(need)}'.")
 					raise ex
 
-				self._needs.append(need)
+				needList.append(need)
 				need.Parent = self
 
 		if variables is not None:
@@ -1529,7 +1529,7 @@ class Job(Base[PipelineFile]):
 					ex.add_note(f"Got type '{getFullyQualifiedName(rule)}'.")
 					raise ex
 
-				self._rules.append(rule)
+				ruleList.append(rule)
 				rule.Parent = self
 
 		if inputs is not None:
@@ -2554,7 +2554,7 @@ class Workflow(Base[PipelineFile]):
 			raise ex
 
 		self._name =  name
-		self._rules = []
+		self._rules = ruleList = []
 
 		if rules is not None:
 			for rule in rules:
@@ -2563,7 +2563,7 @@ class Workflow(Base[PipelineFile]):
 					ex.add_note(f"Got type '{getFullyQualifiedName(rule)}'.")
 					raise ex
 
-				self._rules.append(rule)
+				ruleList.append(rule)
 				rule.Parent = self
 
 		if parent is not None:
@@ -2679,7 +2679,7 @@ class Trigger(Base[Job]):
 		self._project =  project
 		self._branch =   branch
 		self._strategy = strategy
-		self._includes = []
+		self._includes = includeList = []
 
 		if includes is not None:
 			for include in includes:
@@ -2688,7 +2688,7 @@ class Trigger(Base[Job]):
 					ex.add_note(f"Got type '{getFullyQualifiedName(include)}'.")
 					raise ex
 
-				self._includes.append(include)
+				includeList.append(include)
 				include.Parent = self
 
 		if parent is not None:
@@ -2893,7 +2893,7 @@ class Include(Base[Union[PipelineFile, Trigger]]):
 		self._ref =      ref
 		self._job =      job
 		self._inputs =   {} if inputs is None else dict(inputs)
-		self._rules =    []
+		self._rules =    ruleList = []
 
 		if rules is not None:
 			for rule in rules:
@@ -2902,7 +2902,7 @@ class Include(Base[Union[PipelineFile, Trigger]]):
 					ex.add_note(f"Got type '{getFullyQualifiedName(rule)}'.")
 					raise ex
 
-				self._rules.append(rule)
+				ruleList.append(rule)
 				rule.Parent = self
 
 		if parent is not None:
