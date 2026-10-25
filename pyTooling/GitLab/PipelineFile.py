@@ -1409,15 +1409,24 @@ class Job(Base[PipelineFile]):
 		:param unresolved:       Optional, what the job refers to with ``extends`` or a ``!reference`` tag, but its file
 		                         doesn't have. Default: ``None``.
 		:param parent:           Optional, reference to the configuration file containing the job. Default: ``None``.
-		:raises ValueError:      If parameter 'name' or 'stage' is ``None``.
-		:raises TypeError:       If parameter 'name' or 'stage' is not of type :class:`str`.
-		:raises ValueError:      If parameter 'name' or 'stage' is empty.
+		:raises ValueError:      If parameter 'name' is ``None``.
+		:raises TypeError:       If parameter 'name' is not of type :class:`str`.
+		:raises ValueError:      If parameter 'name' is empty.
+		:raises ValueError:      If parameter 'stage' is ``None``.
+		:raises TypeError:       If parameter 'stage' is not of type :class:`str`.
+		:raises ValueError:      If parameter 'stage' is empty.
 		:raises TypeError:       If parameter 'when' is not of type :class:`~pyTooling.CI.RuleOutcome`.
 		:raises TypeError:       If parameter 'allowFailure' is not of type :class:`bool`.
-		:raises TypeError:       If parameter 'image' or 'environment' is not of type :class:`str`.
+		:raises TypeError:       If parameter 'image' is not of type :class:`str`.
+		:raises TypeError:       If parameter 'environment' is not of type :class:`str`.
 		:raises TypeError:       If an element of parameter 'allowedExitCodes' is not of type :class:`int`.
-		:raises TypeError:       If an element of parameter 'script', 'beforeScript', 'afterScript', 'services', 'tags',
-		                         'extends' or 'unresolved' is not of type :class:`str`.
+		:raises TypeError:       If an element of parameter 'script' is not of type :class:`str`.
+		:raises TypeError:       If an element of parameter 'beforeScript' is not of type :class:`str`.
+		:raises TypeError:       If an element of parameter 'afterScript' is not of type :class:`str`.
+		:raises TypeError:       If an element of parameter 'services' is not of type :class:`str`.
+		:raises TypeError:       If an element of parameter 'tags' is not of type :class:`str`.
+		:raises TypeError:       If an element of parameter 'extends' is not of type :class:`str`.
+		:raises TypeError:       If an element of parameter 'unresolved' is not of type :class:`str`.
 		:raises TypeError:       If an element of parameter 'needs' is not of type :class:`Need`.
 		:raises TypeError:       If an element of parameter 'variables' is not of type :class:`Variable`.
 		:raises TypeError:       If an element of parameter 'rules' is not of type :class:`Rule`.
@@ -2249,11 +2258,16 @@ class Need(Base[Job]):
 		:param parent:      Optional, reference to the job whose ``needs`` holds the entry. Default: ``None``.
 		:raises ValueError: If parameter 'kind' is ``None``.
 		:raises TypeError:  If parameter 'kind' is not of type :class:`NeedKind`.
-		:raises TypeError:  If parameter 'job', 'pipeline', 'project' or 'ref' is not of type :class:`str`.
-		:raises TypeError:  If parameter 'artifacts' or 'optional' is not of type :class:`bool`.
+		:raises TypeError:  If parameter 'job' is not of type :class:`str`.
+		:raises TypeError:  If parameter 'pipeline' is not of type :class:`str`.
+		:raises TypeError:  If parameter 'project' is not of type :class:`str`.
+		:raises TypeError:  If parameter 'ref' is not of type :class:`str`.
+		:raises TypeError:  If parameter 'artifacts' is not of type :class:`bool`.
+		:raises TypeError:  If parameter 'optional' is not of type :class:`bool`.
 		:raises ValueError: If parameter 'job' is ``None``, but the kind names a job.
 		:raises ValueError: If parameter 'pipeline' is ``None``, but the kind refers to another pipeline.
-		:raises ValueError: If parameter 'project' or 'ref' is ``None``, but the kind refers to another project's job.
+		:raises ValueError: If parameter 'project' is ``None``, but the kind refers to another project's job.
+		:raises ValueError: If parameter 'ref' is ``None``, but the kind refers to another project's job.
 		:raises TypeError:  If parameter 'parallel' is not of type :class:`Parallel`.
 		"""
 		super().__init__(line, parent=parent)
@@ -2656,7 +2670,8 @@ class Trigger(Base[Job]):
 		:param includes:   Optional, files of the child pipeline's configuration, which are attached to the trigger.
 		                   Default: ``None``.
 		:param parent:     Optional, reference to the job. Default: ``None``.
-		:raises TypeError: If parameter 'project' or 'branch' is not of type :class:`str`.
+		:raises TypeError: If parameter 'project' is not of type :class:`str`.
+		:raises TypeError: If parameter 'branch' is not of type :class:`str`.
 		:raises TypeError: If parameter 'strategy' is not of type :class:`TriggerStrategy`.
 		:raises TypeError: If an element of parameter 'includes' is not of type :class:`Include`.
 		"""
@@ -2847,9 +2862,12 @@ class Include(Base[Union[PipelineFile, Trigger]]):
 		                    Default: ``None``.
 		:param job:         Optional, name of the job, whose artifact is included. Default: ``None``.
 		:param parent:      Optional, reference to the configuration file or the trigger. Default: ``None``.
-		:raises ValueError: If parameter 'kind' or 'location' is ``None``.
+		:raises ValueError: If parameter 'kind' is ``None``.
+		:raises ValueError: If parameter 'location' is ``None``.
 		:raises TypeError:  If parameter 'kind' is not of type :class:`IncludeKind`.
-		:raises TypeError:  If parameter 'location', 'ref' or 'job' is not of type :class:`str`.
+		:raises TypeError:  If parameter 'location' is not of type :class:`str`.
+		:raises TypeError:  If parameter 'ref' is not of type :class:`str`.
+		:raises TypeError:  If parameter 'job' is not of type :class:`str`.
 		:raises ValueError: If parameter 'location' is empty.
 		:raises TypeError:  If an element of parameter 'files' is not of type :class:`str`.
 		:raises TypeError:  If an element of parameter 'rules' is not of type :class:`Rule`.
@@ -3112,8 +3130,10 @@ class Rule(Base[Union[Job, Workflow, Include]]):
 		:param allowFailure: Optional, ``True``, if the pipeline continues when the job fails. Default: ``None``.
 		:param variables:    Optional, variables set, if the rule matches, by name. Default: ``None``.
 		:param parent:       Optional, reference to the job, workflow or include the rule belongs to. Default: ``None``.
-		:raises TypeError:   If parameter 'condition' or 'compareTo' is not of type :class:`str`.
-		:raises TypeError:   If an element of parameter 'changes' or 'exists' is not of type :class:`str`.
+		:raises TypeError:   If parameter 'condition' is not of type :class:`str`.
+		:raises TypeError:   If parameter 'compareTo' is not of type :class:`str`.
+		:raises TypeError:   If an element of parameter 'changes' is not of type :class:`str`.
+		:raises TypeError:   If an element of parameter 'exists' is not of type :class:`str`.
 		:raises TypeError:   If parameter 'when' is not of type :class:`~pyTooling.CI.RuleOutcome`.
 		:raises TypeError:   If parameter 'allowFailure' is not of type :class:`bool`.
 		"""
@@ -3364,8 +3384,10 @@ class Default(Base[PipelineFile]):
 		:param afterScript:  Optional, lines of ``after_script``. Default: ``None``.
 		:param parent:       Optional, reference to the configuration file. Default: ``None``.
 		:raises TypeError:   If parameter 'image' is not of type :class:`str`.
-		:raises TypeError:   If an element of parameter 'services', 'tags', 'beforeScript' or 'afterScript' is not of
-		                     type :class:`str`.
+		:raises TypeError:   If an element of parameter 'services' is not of type :class:`str`.
+		:raises TypeError:   If an element of parameter 'tags' is not of type :class:`str`.
+		:raises TypeError:   If an element of parameter 'beforeScript' is not of type :class:`str`.
+		:raises TypeError:   If an element of parameter 'afterScript' is not of type :class:`str`.
 		"""
 		super().__init__(line, parent=parent)
 
@@ -3761,7 +3783,8 @@ class Input(Base[Union[PipelineFile, Job]]):
 		:raises ValueError: If parameter 'name' is empty.
 		:raises TypeError:  If parameter 'inputType' is not of type :class:`InputType`.
 		:raises TypeError:  If parameter 'required' is not of type :class:`bool`.
-		:raises TypeError:  If parameter 'description' or 'regex' is not of type :class:`str`.
+		:raises TypeError:  If parameter 'description' is not of type :class:`str`.
+		:raises TypeError:  If parameter 'regex' is not of type :class:`str`.
 		"""
 		super().__init__(line, parent=parent)
 
