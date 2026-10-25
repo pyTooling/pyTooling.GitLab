@@ -91,19 +91,23 @@ if TYPE_CHECKING:  # pragma: no cover
 
 __all__ = ["KINDS", "SECTIONS", "MAX_DEFAULT_LENGTH"]
 
-#: The kinds of parameters ``glci:parameter-table`` summarizes, in the order it shows them by default: kind |rarr| the
-#: columns.
 KINDS = {
 	"inputs":    ("Parameter Name", "Required", "Type", "Default"),
 	"variables": ("Variable Name",  "Default",  "Description"),
 }
+"""
+The kinds of parameters ``glci:parameter-table`` summarizes, in the order it shows them by default: kind |rarr| the
+columns.
+"""
 
-#: The parts of a pipeline file ``glci:yaml`` shows by option ``:section:``: the inputs of the header's ``spec``, and
-#: the top-level keys of the configuration.
 SECTIONS = ("inputs", "variables", "stages", "include", "workflow", "default")
+"""
+The parts of a pipeline file ``glci:yaml`` shows by option ``:section:``: the inputs of the header's ``spec``, and
+the top-level keys of the configuration.
+"""
 
-#: The length a default is shortened to in a summary table; a multi-line default is shortened to its first line.
 MAX_DEFAULT_LENGTH = 120
+"""The length a default is shortened to in a summary table; a multi-line default is shortened to its first line."""
 
 _logger = getLogger(__name__)
 
