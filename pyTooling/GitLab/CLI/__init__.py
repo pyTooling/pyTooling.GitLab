@@ -44,8 +44,10 @@ The command line interface of pyTooling.GitLab, and its :program:`pytooling-gitl
 """
 from argparse                               import RawDescriptionHelpFormatter, Namespace
 from textwrap                               import dedent
+from types                                  import ModuleType
 from typing                                 import ClassVar, NoReturn
 
+from pyTooling                              import GitLab
 from pyTooling.Decorators                   import export
 from pyTooling.Exceptions                   import ExceptionBase, MissingDependencyError, ToolingException
 from pyTooling.Attributes.ArgParse          import ArgParseHelperMixin, DefaultHandler, CommandHandler
@@ -65,7 +67,8 @@ class Application(TerminalApplication, PipelineHandlers, ArgParseHelperMixin):
 	which this class inherits from - so a new command is a new mixin and one more base-class, and nothing here has
 	to know what it does.
 	"""
-	HEADLINE: ClassVar[str] = "pyTooling.GitLab Service Program"  #: Headline printed above every command's output.
+	HEADLINE:      ClassVar[str]        = "pyTooling.GitLab Service Program"  #: Headline above every command's output.
+	DUNDER_MODULE: ClassVar[ModuleType] = GitLab                              #: Package with the dunder variables.
 
 	def __init__(self) -> None:
 		"""Initializes the program, its terminal and its command line parser."""
@@ -130,10 +133,8 @@ class Application(TerminalApplication, PipelineHandlers, ArgParseHelperMixin):
 	@CommandHandler("version", help="Display version information.", description="Display version information.")
 	def HandleVersion(self, _: Namespace) -> None:
 		"""Handle program calls with command ``version``."""
-		from pyTooling import GitLab as DunderModule
-
 		self._PrintHeadline()
-		self._PrintVersion(DunderModule, "pyTooling.GitLab")
+		self._PrintVersion("pyTooling.GitLab")
 
 
 @export
