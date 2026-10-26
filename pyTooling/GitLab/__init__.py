@@ -37,7 +37,7 @@ A trace is written e.g. as OpenTelemetry's OTLP/JSON.
 The models derive from the service-independent model :mod:`pyTooling.CI`. Every exception raised by this package
 derives from :exc:`GitLabError`.
 """
-from __future__                import annotations
+from __future__            import annotations
 
 __author__ =            "Patrick Lehmann"
 __email__ =             "Paebbels@gmail.com"
@@ -49,19 +49,19 @@ __project_url__ =       "https://github.com/pyTooling/pyTooling.GitLab"
 __documentation_url__ = "https://pyTooling.github.io/pyTooling.GitLab"
 __issue_tracker_url__ = "https://GitHub.com/pyTooling/pyTooling.GitLab/issues"
 
-from datetime                  import datetime, timezone
-from http                      import HTTPMethod
-from json                      import loads as json_loads
-from typing                    import Optional as Nullable, Any, ClassVar, Hashable, Iterable, Mapping, Self, Union
+from datetime              import datetime, timezone
+from http                  import HTTPMethod
+from json                  import loads as json_loads
+from typing                import Optional as Nullable, Any, ClassVar, Hashable, Iterable, Mapping, Self, Union
 
-from pyTooling.CI              import CIError, MatrixInstanceMixin, Outcome, Job as CIJob, JobGroup as CIJobGroup, \
-                                      Matrix as CIMatrix, Pipeline as CIPipeline, PipelineGroup as CIPipelineGroup, \
-                                      Workflow as CIWorkflow
-from pyTooling.Common          import getFullyQualifiedName, parseISO8601Timestamp, StringEnum
-from pyTooling.Decorators      import export, readonly
-from pyTooling.GenericPath.URL import URL
-from pyTooling.MetaClasses     import ExtendedType
-from pyTooling.REST            import JSONObject, MediaType, RESTClient, RESTError
+from pyTooling.CI          import CIError, MatrixInstanceMixin, Outcome, Job as CIJob, JobGroup as CIJobGroup, \
+                                  Matrix as CIMatrix, Pipeline as CIPipeline, PipelineGroup as CIPipelineGroup, \
+                                  Workflow as CIWorkflow
+from pyTooling.Common      import getFullyQualifiedName, parseISO8601Timestamp, StringEnum
+from pyTooling.Decorators  import export, readonly
+from pyTooling.URI         import URL
+from pyTooling.MetaClasses import ExtendedType
+from pyTooling.REST        import JSONObject, MediaType, RESTClient, RESTError
 
 
 __all__ = ["GITLAB_API_URL", "STATUS_TO_OUTCOME", "TIMEOUT_FAILURE_REASONS"]
@@ -432,7 +432,7 @@ class StatusMixin(metaclass=ExtendedType, mixin=True, expects=("_outcome",)):
 		:param url:           Optional, URL of the element in GitLab's web interface. Default: ``None``.
 		:raises TypeError:    If parameter 'status' is not of type :class:`Status`.
 		:raises TypeError:    If parameter 'failureReason' is not of type :class:`str`.
-		:raises TypeError:    If parameter 'url' is not of type :class:`~pyTooling.GenericPath.URL.URL`.
+		:raises TypeError:    If parameter 'url' is not of type :class:`~pyTooling.URI.URL`.
 		"""
 		if status is not None and not isinstance(status, Status):
 			ex = TypeError("Parameter 'status' is not of type 'Status'.")
@@ -1445,7 +1445,7 @@ class DownstreamPipeline(CIWorkflow, StatusMixin, JobMixin, PipelineContentsMixi
 		:raises TypeError:          If parameter 'downstreamID' is not of type :class:`int`.
 		:raises TypeError:          If parameter 'downstreamProjectID' is not of type :class:`int`.
 		:raises TypeError:          If parameter 'triggerStatus' is not of type :class:`Status`.
-		:raises TypeError:          If parameter 'triggerURL' is not of type :class:`~pyTooling.GenericPath.URL.URL`.
+		:raises TypeError:          If parameter 'triggerURL' is not of type :class:`~pyTooling.URI.URL`.
 		"""
 		super().__init__(
 			name, reference=reference, createdAt=createdAt, startedAt=startedAt, completedAt=completedAt,
