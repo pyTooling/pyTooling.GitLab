@@ -27,7 +27,7 @@ library only:
 
    reader = PipelineReader("gitlab-org/gitlab-development-kit", token=getenv("GITLAB_TOKEN"))
    trace = reader.ReadPipeline(2954836704)      # optionally: downstream=False
-   trace.WriteJSONFile(Path("report/Pipeline.otlp.json"))
+   trace.WriteOTLPJSONFile(Path("report/Pipeline.otlp.json"))
 
 The project is given by its path or its numeric identifier. A public project's pipelines are read without a token; a
 private project's need one with the ``read_api`` scope. A self-managed GitLab instance is reached with
