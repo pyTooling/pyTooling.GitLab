@@ -298,12 +298,14 @@ pyTooling_DocCoverage_Packages = {
 # pyTooling.Sphinx - dependency tables
 # ==============================================================================
 pyTooling_Dependency_Requirements = {
-	"package":       {"file":    "../requirements.txt"},
-	"diagram":       {"package": "pyTooling.GitLab[diagram]"},
-	"sphinx":        {"package": "pyTooling.GitLab[sphinx]"},
-	"unittest":      {"file":    "../tests/unit/requirements.txt"},
-	"apptest":       {"file":    "../tests/app/requirements.txt"},
-	"documentation": {"file":    "requirements.txt"},
+	"package":       {"file":      "../requirements.txt"},
+	"diagram":       {"package":   "pyTooling.GitLab[diagram]"},
+	"sphinx":        {"package":   "pyTooling.GitLab[sphinx]"},
+	"unittest":      {"file":      "../tests/unit/requirements.txt"},
+	"apptest":       {"file":      "../tests/app/requirements.txt"},
+	"documentation": {"file":      "requirements.txt"},
+	"packaging":     {"pyproject": True},
+	"publishing":    {"file":      "../dist/requirements.txt"},
 }
 pyTooling_Dependency_PackageOverrides = "Dependency.PackageOverrides.yaml"
 
