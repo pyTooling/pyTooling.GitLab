@@ -43,15 +43,8 @@ Gantt Charts (Optional)
 When installed as ``pyTooling.GitLab[diagram]``, which the :ref:`trace diagram <VIS/PipelineTrace>` and the program's
 ``--gantt`` option need:
 
-.. The extra isn't on PyPI yet, which 'dependency-table' reads extras from. Replace this table by
-   '.. dependency-table:: diagram' and an entry in 'conf.py' once a release contains the extra.
-
-+-------------+---------+------------------------------+----------------------------------------------------------+
-| Package     | Version | License                      | Dependencies                                             |
-+=============+=========+==============================+==========================================================+
-| matplotlib  | ≥3.10   | PSF-2.0 (matplotlib license) | contourpy, cycler, fonttools, kiwisolver, numpy,         |
-|             |         |                              | packaging, pillow, pyparsing, python-dateutil            |
-+-------------+---------+------------------------------+----------------------------------------------------------+
+.. dependency-table:: diagram
+   :caption: Dependencies added by the ``diagram`` extra.
 
 
 .. _DEP/sphinx:
@@ -62,14 +55,8 @@ Sphinx Domain ``glci`` (Optional)
 When installed as ``pyTooling.GitLab[sphinx]``, which the :ref:`glci domain <GLCI>` needs. pyTooling.Sphinx requires
 Python 3.12 or newer, because Sphinx 9.1 does.
 
-.. The extra isn't on PyPI yet, which 'dependency-table' reads extras from. Replace this table by
-   '.. dependency-table:: sphinx' and an entry in 'conf.py' once a release contains the extra.
-
-+------------------+------------+------------------------------+-----------------------------------------------------+
-| Package          | Version    | License                      | Dependencies                                        |
-+==================+============+==============================+=====================================================+
-| pyTooling.Sphinx | ~=0.1.0rc3 | Apache-2.0                   | pyTooling[pypi], sphinx, xmlschema                  |
-+------------------+------------+------------------------------+-----------------------------------------------------+
+.. dependency-table:: sphinx
+   :caption: Dependencies added by the ``sphinx`` extra.
 
 
 .. _DEP/testing:
@@ -198,3 +185,73 @@ the mandatory dependencies too.
 
 .. dependency-table:: documentation
    :caption: Dependencies for building the documentation.
+
+
+.. _DEP/packaging:
+
+Packaging (Optional)
+********************
+
+Additional Python packages needed for installation package generation. These packages are only needed for developers or
+on a CI server.
+
+.. rubric:: Building an Installation Package
+
+:file:`pyproject.toml` lists them as build requirements (``[build-system]``), so ``build`` installs them into an
+isolated build environment itself.
+
+.. tab-set::
+
+   .. tab-item:: Linux/macOS
+      :sync: Linux
+
+      .. code-block:: bash
+
+         python3 -m build --wheel
+
+   .. tab-item:: Windows
+      :sync: Windows
+
+      .. code-block:: powershell
+
+         python -m build --wheel
+
+.. rubric:: Dependency List
+
+.. dependency-table:: packaging
+   :caption: Dependencies for generating an installation package.
+
+
+.. _DEP/publishing:
+
+Publishing (CI-Server only)
+***************************
+
+Additional Python packages needed for publishing the generated installation package to e.g, PyPI or any equivalent
+services. These packages are only needed for maintainers or on a CI server.
+
+.. rubric:: Manually Installing Publishing Requirements
+
+Use the :file:`dist/requirements.txt` file to install all dependencies via ``pip3``. The file will recursively
+install the mandatory dependencies too.
+
+.. tab-set::
+
+   .. tab-item:: Linux/macOS
+      :sync: Linux
+
+      .. code-block:: bash
+
+         pip3 install -U -r dist/requirements.txt
+
+   .. tab-item:: Windows
+      :sync: Windows
+
+      .. code-block:: powershell
+
+         pip install -U -r dist\requirements.txt
+
+.. rubric:: Dependency List
+
+.. dependency-table:: publishing
+   :caption: Dependencies for publishing the package.

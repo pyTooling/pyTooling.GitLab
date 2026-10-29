@@ -35,7 +35,7 @@ traces'.
 from setuptools          import setup
 
 from pathlib             import Path
-from pyTooling.Packaging import DescribePythonPackageHostedOnGitHub
+from pyTooling.Packaging import DEFAULT_CLASSIFIERS, DescribePythonPackageHostedOnGitHub
 from pyTooling.Warning   import WarningCollector
 
 gitHubNamespace =        "pyTooling"
@@ -52,11 +52,15 @@ with WarningCollector() as warnings:
 			gitHubNamespace=gitHubNamespace,
 			unittestRequirementsFile=Path("tests/requirements.txt"),
 			sourceFileWithVersion=packageInformationFile,
+			classifiers=list(DEFAULT_CLASSIFIERS) + [
+				"Framework :: Sphinx :: Domain",
+				"Framework :: Sphinx :: Extension",
+			],
 			developmentStatus="pre-alpha",
 			pythonVersions=("3.11", "3.12", "3.13", "3.14", "3.15"),
 			additionalRequirements={
 				"diagram": ["matplotlib >= 3.10"],
-				"sphinx":  ["pyTooling.Sphinx ~= 0.1.0rc3"],
+				"sphinx":  ["pyTooling.Sphinx ~= 1.0"],
 			},
 			consoleScripts={
 				"pytooling-gitlab": "pyTooling.GitLab.CLI:main"

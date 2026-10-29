@@ -67,12 +67,12 @@ from __future__               import annotations
 from enum                     import Enum
 from itertools                import product
 from pathlib                  import Path
-from typing                   import Any, ClassVar, Generic, Hashable, Iterable, Iterator, Mapping, Optional as Nullable
-from typing                   import Self, Sequence, TypeVar, Union
+from typing                   import Any, ClassVar, Generic, Hashable, Iterable, Iterator, Mapping, \
+                                     Optional as Nullable, Self, Sequence, TypeVar, Union
 
-from pyTooling.CI             import DependencyMixin, Job as CIJob, JobGroup, Matrix as CIMatrix
-from pyTooling.CI             import MatrixJob as CIMatrixJob, MatrixWorkflow as CIMatrixWorkflow
-from pyTooling.CI             import Pipeline as CIPipeline, Rule as CIRule, RuleOutcome, Workflow as CIWorkflow
+from pyTooling.CI             import DependencyMixin, Job as CIJob, JobGroup, Matrix as CIMatrix, \
+                                     MatrixJob as CIMatrixJob, MatrixWorkflow as CIMatrixWorkflow, \
+                                     Pipeline as CIPipeline, Rule as CIRule, RuleOutcome, Workflow as CIWorkflow
 
 from pyTooling.Common         import getFullyQualifiedName, StringEnum
 from pyTooling.Decorators     import export, readonly
@@ -460,7 +460,7 @@ class PipelineFile(Base[None]):
 		self._jobs =         {}
 		self._hiddenJobs =   {}
 		self._workflow =     None
-		self._includes =     []
+		self._includes =     includeList = []
 		self._default =      None
 		self._inputs =       {}
 		self._description =  description
@@ -509,7 +509,7 @@ class PipelineFile(Base[None]):
 					ex.add_note(f"Got type '{getFullyQualifiedName(include)}'.")
 					raise ex
 
-				self._includes.append(include)
+				includeList.append(include)
 				include.Parent = self
 
 		if default is not None:
@@ -1409,21 +1409,30 @@ class Job(Base[PipelineFile]):
 		:param unresolved:       Optional, what the job refers to with ``extends`` or a ``!reference`` tag, but its file
 		                         doesn't have. Default: ``None``.
 		:param parent:           Optional, reference to the configuration file containing the job. Default: ``None``.
-		:raises ValueError:      If parameter 'name' or 'stage' is ``None``.
-		:raises TypeError:       If parameter 'name' or 'stage' is not of type :class:`str`.
-		:raises ValueError:      If parameter 'name' or 'stage' is empty.
+		:raises ValueError:      If parameter 'name' is ``None``.
+		:raises TypeError:       If parameter 'name' is not of type :class:`str`.
+		:raises ValueError:      If parameter 'name' is empty.
+		:raises ValueError:      If parameter 'stage' is ``None``.
+		:raises TypeError:       If parameter 'stage' is not of type :class:`str`.
+		:raises ValueError:      If parameter 'stage' is empty.
+		:raises TypeError:       If an element of parameter 'needs' is not of type :class:`Need`.
 		:raises TypeError:       If parameter 'when' is not of type :class:`~pyTooling.CI.RuleOutcome`.
 		:raises TypeError:       If parameter 'allowFailure' is not of type :class:`bool`.
-		:raises TypeError:       If parameter 'image' or 'environment' is not of type :class:`str`.
 		:raises TypeError:       If an element of parameter 'allowedExitCodes' is not of type :class:`int`.
-		:raises TypeError:       If an element of parameter 'script', 'beforeScript', 'afterScript', 'services', 'tags',
-		                         'extends' or 'unresolved' is not of type :class:`str`.
-		:raises TypeError:       If an element of parameter 'needs' is not of type :class:`Need`.
+		:raises TypeError:       If an element of parameter 'script' is not of type :class:`str`.
+		:raises TypeError:       If an element of parameter 'beforeScript' is not of type :class:`str`.
+		:raises TypeError:       If an element of parameter 'afterScript' is not of type :class:`str`.
+		:raises TypeError:       If parameter 'image' is not of type :class:`str`.
+		:raises TypeError:       If an element of parameter 'services' is not of type :class:`str`.
+		:raises TypeError:       If an element of parameter 'tags' is not of type :class:`str`.
+		:raises TypeError:       If parameter 'environment' is not of type :class:`str`.
 		:raises TypeError:       If an element of parameter 'variables' is not of type :class:`Variable`.
 		:raises TypeError:       If an element of parameter 'rules' is not of type :class:`Rule`.
 		:raises TypeError:       If an element of parameter 'inputs' is not of type :class:`Input`.
 		:raises TypeError:       If parameter 'parallel' is not of type :class:`Parallel`.
 		:raises TypeError:       If parameter 'trigger' is not of type :class:`Trigger`.
+		:raises TypeError:       If an element of parameter 'extends' is not of type :class:`str`.
+		:raises TypeError:       If an element of parameter 'unresolved' is not of type :class:`str`.
 		"""
 		super().__init__(line, parent=parent)
 
@@ -1491,7 +1500,7 @@ class Job(Base[PipelineFile]):
 		self._name =         name
 		self._stage =        stage
 		self._needs =        None
-		self._rules =        []
+		self._rules =        ruleList = []
 		self._inputs =       {}
 		self._parallel =     None
 		self._trigger =      None
@@ -1502,14 +1511,14 @@ class Job(Base[PipelineFile]):
 		self._variables =    {}
 
 		if needs is not None:
-			self._needs = []
+			self._needs = needList = []
 			for need in needs:
 				if not isinstance(need, Need):
 					ex = TypeError("An element of parameter 'needs' is not of type 'Need'.")
 					ex.add_note(f"Got type '{getFullyQualifiedName(need)}'.")
 					raise ex
 
-				self._needs.append(need)
+				needList.append(need)
 				need.Parent = self
 
 		if variables is not None:
@@ -1529,7 +1538,7 @@ class Job(Base[PipelineFile]):
 					ex.add_note(f"Got type '{getFullyQualifiedName(rule)}'.")
 					raise ex
 
-				self._rules.append(rule)
+				ruleList.append(rule)
 				rule.Parent = self
 
 		if inputs is not None:
@@ -2247,13 +2256,18 @@ class Need(Base[Job]):
 		:param parallel:    Optional, the matrix instances of the needed job, which are needed, which is attached to
 		                    the need. Default: ``None``, for every instance.
 		:param parent:      Optional, reference to the job whose ``needs`` holds the entry. Default: ``None``.
+		:raises TypeError:  If parameter 'job' is not of type :class:`str`.
+		:raises ValueError: If parameter 'job' is ``None``, but the kind names a job.
 		:raises ValueError: If parameter 'kind' is ``None``.
 		:raises TypeError:  If parameter 'kind' is not of type :class:`NeedKind`.
-		:raises TypeError:  If parameter 'job', 'pipeline', 'project' or 'ref' is not of type :class:`str`.
-		:raises TypeError:  If parameter 'artifacts' or 'optional' is not of type :class:`bool`.
-		:raises ValueError: If parameter 'job' is ``None``, but the kind names a job.
+		:raises TypeError:  If parameter 'artifacts' is not of type :class:`bool`.
+		:raises TypeError:  If parameter 'optional' is not of type :class:`bool`.
+		:raises TypeError:  If parameter 'pipeline' is not of type :class:`str`.
 		:raises ValueError: If parameter 'pipeline' is ``None``, but the kind refers to another pipeline.
-		:raises ValueError: If parameter 'project' or 'ref' is ``None``, but the kind refers to another project's job.
+		:raises TypeError:  If parameter 'project' is not of type :class:`str`.
+		:raises ValueError: If parameter 'project' is ``None``, but the kind refers to another project's job.
+		:raises TypeError:  If parameter 'ref' is not of type :class:`str`.
+		:raises ValueError: If parameter 'ref' is ``None``, but the kind refers to another project's job.
 		:raises TypeError:  If parameter 'parallel' is not of type :class:`Parallel`.
 		"""
 		super().__init__(line, parent=parent)
@@ -2554,7 +2568,7 @@ class Workflow(Base[PipelineFile]):
 			raise ex
 
 		self._name =  name
-		self._rules = []
+		self._rules = ruleList = []
 
 		if rules is not None:
 			for rule in rules:
@@ -2563,7 +2577,7 @@ class Workflow(Base[PipelineFile]):
 					ex.add_note(f"Got type '{getFullyQualifiedName(rule)}'.")
 					raise ex
 
-				self._rules.append(rule)
+				ruleList.append(rule)
 				rule.Parent = self
 
 		if parent is not None:
@@ -2656,7 +2670,8 @@ class Trigger(Base[Job]):
 		:param includes:   Optional, files of the child pipeline's configuration, which are attached to the trigger.
 		                   Default: ``None``.
 		:param parent:     Optional, reference to the job. Default: ``None``.
-		:raises TypeError: If parameter 'project' or 'branch' is not of type :class:`str`.
+		:raises TypeError: If parameter 'project' is not of type :class:`str`.
+		:raises TypeError: If parameter 'branch' is not of type :class:`str`.
 		:raises TypeError: If parameter 'strategy' is not of type :class:`TriggerStrategy`.
 		:raises TypeError: If an element of parameter 'includes' is not of type :class:`Include`.
 		"""
@@ -2679,7 +2694,7 @@ class Trigger(Base[Job]):
 		self._project =  project
 		self._branch =   branch
 		self._strategy = strategy
-		self._includes = []
+		self._includes = includeList = []
 
 		if includes is not None:
 			for include in includes:
@@ -2688,7 +2703,7 @@ class Trigger(Base[Job]):
 					ex.add_note(f"Got type '{getFullyQualifiedName(include)}'.")
 					raise ex
 
-				self._includes.append(include)
+				includeList.append(include)
 				include.Parent = self
 
 		if parent is not None:
@@ -2847,12 +2862,15 @@ class Include(Base[Union[PipelineFile, Trigger]]):
 		                    Default: ``None``.
 		:param job:         Optional, name of the job, whose artifact is included. Default: ``None``.
 		:param parent:      Optional, reference to the configuration file or the trigger. Default: ``None``.
-		:raises ValueError: If parameter 'kind' or 'location' is ``None``.
+		:raises ValueError: If parameter 'kind' is ``None``.
 		:raises TypeError:  If parameter 'kind' is not of type :class:`IncludeKind`.
-		:raises TypeError:  If parameter 'location', 'ref' or 'job' is not of type :class:`str`.
+		:raises ValueError: If parameter 'location' is ``None``.
+		:raises TypeError:  If parameter 'location' is not of type :class:`str`.
 		:raises ValueError: If parameter 'location' is empty.
 		:raises TypeError:  If an element of parameter 'files' is not of type :class:`str`.
+		:raises TypeError:  If parameter 'ref' is not of type :class:`str`.
 		:raises TypeError:  If an element of parameter 'rules' is not of type :class:`Rule`.
+		:raises TypeError:  If parameter 'job' is not of type :class:`str`.
 		"""
 		super().__init__(line, parent=parent)
 
@@ -2893,7 +2911,7 @@ class Include(Base[Union[PipelineFile, Trigger]]):
 		self._ref =      ref
 		self._job =      job
 		self._inputs =   {} if inputs is None else dict(inputs)
-		self._rules =    []
+		self._rules =    ruleList = []
 
 		if rules is not None:
 			for rule in rules:
@@ -2902,7 +2920,7 @@ class Include(Base[Union[PipelineFile, Trigger]]):
 					ex.add_note(f"Got type '{getFullyQualifiedName(rule)}'.")
 					raise ex
 
-				self._rules.append(rule)
+				ruleList.append(rule)
 				rule.Parent = self
 
 		if parent is not None:
@@ -3112,8 +3130,10 @@ class Rule(Base[Union[Job, Workflow, Include]]):
 		:param allowFailure: Optional, ``True``, if the pipeline continues when the job fails. Default: ``None``.
 		:param variables:    Optional, variables set, if the rule matches, by name. Default: ``None``.
 		:param parent:       Optional, reference to the job, workflow or include the rule belongs to. Default: ``None``.
-		:raises TypeError:   If parameter 'condition' or 'compareTo' is not of type :class:`str`.
-		:raises TypeError:   If an element of parameter 'changes' or 'exists' is not of type :class:`str`.
+		:raises TypeError:   If parameter 'condition' is not of type :class:`str`.
+		:raises TypeError:   If an element of parameter 'changes' is not of type :class:`str`.
+		:raises TypeError:   If parameter 'compareTo' is not of type :class:`str`.
+		:raises TypeError:   If an element of parameter 'exists' is not of type :class:`str`.
 		:raises TypeError:   If parameter 'when' is not of type :class:`~pyTooling.CI.RuleOutcome`.
 		:raises TypeError:   If parameter 'allowFailure' is not of type :class:`bool`.
 		"""
@@ -3364,8 +3384,10 @@ class Default(Base[PipelineFile]):
 		:param afterScript:  Optional, lines of ``after_script``. Default: ``None``.
 		:param parent:       Optional, reference to the configuration file. Default: ``None``.
 		:raises TypeError:   If parameter 'image' is not of type :class:`str`.
-		:raises TypeError:   If an element of parameter 'services', 'tags', 'beforeScript' or 'afterScript' is not of
-		                     type :class:`str`.
+		:raises TypeError:   If an element of parameter 'services' is not of type :class:`str`.
+		:raises TypeError:   If an element of parameter 'tags' is not of type :class:`str`.
+		:raises TypeError:   If an element of parameter 'beforeScript' is not of type :class:`str`.
+		:raises TypeError:   If an element of parameter 'afterScript' is not of type :class:`str`.
 		"""
 		super().__init__(line, parent=parent)
 
@@ -3761,7 +3783,8 @@ class Input(Base[Union[PipelineFile, Job]]):
 		:raises ValueError: If parameter 'name' is empty.
 		:raises TypeError:  If parameter 'inputType' is not of type :class:`InputType`.
 		:raises TypeError:  If parameter 'required' is not of type :class:`bool`.
-		:raises TypeError:  If parameter 'description' or 'regex' is not of type :class:`str`.
+		:raises TypeError:  If parameter 'description' is not of type :class:`str`.
+		:raises TypeError:  If parameter 'regex' is not of type :class:`str`.
 		"""
 		super().__init__(line, parent=parent)
 

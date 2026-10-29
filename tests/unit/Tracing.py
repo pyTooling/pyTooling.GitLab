@@ -36,8 +36,8 @@ from unittest                 import mock
 from urllib.error             import HTTPError
 
 from pyTooling.GitLab         import GitLabError, Pipeline
-from pyTooling.GitLab.Tracing import DownstreamSpan, GitLab, JobSpan, MatrixSpan, PipelineReader, PipelineTrace
-from pyTooling.GitLab.Tracing import QueuedSpan, runnerCategory
+from pyTooling.GitLab.Tracing import DownstreamSpan, GitLab, JobSpan, MatrixSpan, PipelineReader, PipelineTrace, \
+                                     QueuedSpan, runnerCategory
 from pyTooling.REST           import RESTError
 from pyTooling.Tracing.CI     import CI, OTLP, Result, SpanKind
 from pyTooling.Testing        import Testcase, testsuite, testcase

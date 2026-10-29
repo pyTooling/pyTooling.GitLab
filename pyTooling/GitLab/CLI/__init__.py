@@ -44,8 +44,10 @@ The command line interface of pyTooling.GitLab, and its :program:`pytooling-gitl
 """
 from argparse                               import RawDescriptionHelpFormatter, Namespace
 from textwrap                               import dedent
+from types                                  import ModuleType
 from typing                                 import ClassVar, NoReturn
 
+from pyTooling                              import GitLab
 from pyTooling.Decorators                   import export
 from pyTooling.Exceptions                   import ExceptionBase, MissingDependencyError, ToolingException
 from pyTooling.Attributes.ArgParse          import ArgParseHelperMixin, DefaultHandler, CommandHandler
@@ -65,7 +67,8 @@ class Application(TerminalApplication, PipelineHandlers, ArgParseHelperMixin):
 	which this class inherits from - so a new command is a new mixin and one more base-class, and nothing here has
 	to know what it does.
 	"""
-	HeadLine: ClassVar[str] = "pyTooling.GitLab Service Program"  #: Headline printed above every command's output.
+	HEADLINE:      ClassVar[str]        = "pyTooling.GitLab Service Program"  #: Headline above every command's output.
+	DUNDER_MODULE: ClassVar[ModuleType] = GitLab                              #: Package with the dunder variables.
 
 	def __init__(self) -> None:
 		"""Initializes the program, its terminal and its command line parser."""
@@ -91,7 +94,7 @@ class Application(TerminalApplication, PipelineHandlers, ArgParseHelperMixin):
 			self,
 			prog="pytooling-gitlab",
 			description=dedent(f"""\
-				'{self.HeadLine}' to work with GitLab pipelines.
+				'{self.HEADLINE}' to work with GitLab pipelines.
 				"""),
 			formatter_class=HelpFormatter,
 			add_help=False
@@ -130,10 +133,8 @@ class Application(TerminalApplication, PipelineHandlers, ArgParseHelperMixin):
 	@CommandHandler("version", help="Display version information.", description="Display version information.")
 	def HandleVersion(self, _: Namespace) -> None:
 		"""Handle program calls with command ``version``."""
-		from pyTooling import GitLab as DunderModule
-
 		self._PrintHeadline()
-		self._PrintVersion(DunderModule, "pyTooling.GitLab")
+		self._PrintVersion("pyTooling.GitLab")
 
 
 @export
@@ -161,12 +162,12 @@ def main() -> NoReturn:
 	except MissingDependencyError as ex:
 		program.PrintMissingDependencyError(ex)
 	except ToolingException as ex:
-		program.WriteLineToStdErr(f"{{RED}}[ERROR] {ex}{{NOCOLOR}}".format(**program.Foreground))
+		program.WriteLineToStdErr(f"{{RED}}[ERROR] {ex}{{NOCOLOR}}".format(**program.FOREGROUND))
 		if ex.__cause__ is not None:
-			program.WriteLineToStdErr(f"{{DARK_YELLOW}}Because of: {ex.__cause__}{{NOCOLOR}}".format(**program.Foreground))
+			program.WriteLineToStdErr(f"{{DARK_YELLOW}}Because of: {ex.__cause__}{{NOCOLOR}}".format(**program.FOREGROUND))
 
 		for note in getattr(ex, "__notes__", ()) or ():
-			program.WriteLineToStdErr(f"{{DARK_YELLOW}} [NOTE] {note}{{NOCOLOR}}".format(**program.Foreground))
+			program.WriteLineToStdErr(f"{{DARK_YELLOW}} [NOTE] {note}{{NOCOLOR}}".format(**program.FOREGROUND))
 		program.Exit(1)
 	except ExceptionBase as ex:
 		program.PrintExceptionBase(ex)

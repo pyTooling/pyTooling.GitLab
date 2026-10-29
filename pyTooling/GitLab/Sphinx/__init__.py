@@ -108,19 +108,23 @@ if TYPE_CHECKING:  # pragma: no cover
 
 __all__ = ["NO_DEFAULT", "WARNING_TYPE", "LEADING_FIELDS", "FILE_SUFFIXES"]
 
-#: The text of the field *Default Value* when a parameter has no default.
 NO_DEFAULT = "— — — —"
+"""The text of the field *Default Value* when a parameter has no default."""
 
-#: The type of the warnings this domain emits; the drift warnings have the subtype ``drift``, so
-#: ``suppress_warnings = ["glci.drift"]`` silences them.
 WARNING_TYPE = "glci"
+"""
+The type of the warnings this domain emits; the drift warnings have the subtype ``drift``, so
+``suppress_warnings = ["glci.drift"]`` silences them.
+"""
 
-#: The fields a *Description* taken from the pipeline file follows.
 LEADING_FIELDS = ("Type", "Required", "Default Value", "Possible Values", "Pattern")
+"""The fields a *Description* taken from the pipeline file follows."""
 
-#: The file names a ``glci:pipeline`` without ``:file:`` tries in ``glci_pipeline_directory``, in this order; ``{name}``
-#: is the pipeline's name. The last is a CI/CD component's layout.
 FILE_SUFFIXES = ("{name}.yml", "{name}.yaml", "{name}/template.yml", "{name}/template.yaml")
+"""
+The file names a ``glci:pipeline`` without ``:file:`` tries in ``glci_pipeline_directory``, in this order; ``{name}``
+is the pipeline's name. The last is a CI/CD component's layout.
+"""
 
 _logger = getLogger(__name__)
 
@@ -892,8 +896,8 @@ def setup(sphinx: Sphinx) -> dict[str, Any]:
 	"""
 	from pyTooling.GitLab                  import __version__
 	from pyTooling.GitLab.Sphinx.Graph     import PipelineGraph, resolveLinks
-	from pyTooling.GitLab.Sphinx.Reference import AutoInputs, Dependencies, Interface, ParameterTable, YAMLExcerpt
-	from pyTooling.GitLab.Sphinx.Reference import checkUndocumentedInputs
+	from pyTooling.GitLab.Sphinx.Reference import AutoInputs, Dependencies, Interface, ParameterTable, YAMLExcerpt, \
+	                                              checkUndocumentedInputs
 
 	sphinx.setup_extension("pyTooling.Sphinx")
 
