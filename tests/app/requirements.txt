@@ -1,7 +1,7 @@
 -r ../../requirements.txt
 
 # Test Runner
-pytest ~= 9.1
+pytest ~= 9.2
 pytest-xdist ~= 3.8
 
 # What the program needs. Installing the wheel doesn't pull an extra in - a wheel path carries no extras
