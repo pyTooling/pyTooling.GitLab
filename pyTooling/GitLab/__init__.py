@@ -1605,7 +1605,7 @@ class DownstreamPipeline(CIWorkflow, StatusMixin, JobMixin, PipelineContentsMixi
 
 		reference = None
 		if (projectID := bridge.get("pipeline", {}).get("project_id", None)) is not None and url is not None:
-			if summary.get("project_id", None) not in (None, projectID):
+			if (summaryProjectID := summary.get("project_id", None)) is not None and summaryProjectID != projectID:
 				reference = str(url.Path).strip("/").partition("/-/")[0]
 
 		return {
